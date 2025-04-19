@@ -1,0 +1,29 @@
+create_project:
+  repo: seanr87/kickoff-kit
+  project_title: Kickoff Kit Tasks
+  project_description: Project board for automation and task tracking
+  milestone_title: Prototype
+  release_tag: v1
+  release_name: Version 1
+  release_description: Initial prototype milestone
+  custom_fields:
+  - name: start date
+    type: text
+  - name: end date
+    type: text
+  - name: workstream
+    type: single_select
+    options:
+    - Core
+    - LLM
+    - GitHub
+    - Logging
+  - name: mvp
+    type: single_select
+    options:
+    - 'Yes'
+    - 'No'
+  - name: dependencies
+    type: text
+import_issues:
+  issue_csv_path: scripts/import_issues/issues.csv

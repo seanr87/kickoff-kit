@@ -1,0 +1,16 @@
+# Secrets
+secrets.yaml
+kickoff-kit-pat.txt
+
+# Python cache
+__pycache__/
+*.pyc
+
+# VS Code and system files
+.vscode/
+.DS_Store
+
+# IDs file (optional to ignore if generated and shouldn't be tracked)
+ids.yaml
+kickoff-kit.wiki/
+kickoff-kit.wiki/

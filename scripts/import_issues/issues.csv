@@ -1,0 +1,8 @@
+title,body,assignees,labels,milestone,start date,end date,workstream,mvp,dependencies
+Refactor config loader for shared use,Extract common logic from config loading to a utility module for use across scripts.,,enhancement,Prototype,2025-04-22,2025-04-24,Core,Yes,
+Create a flexible Issue importer,Develop a script that reads issues from CSV and creates them with metadata fields.,,automation,Prototype,2025-04-22,2025-04-25,GitHub,Yes,
+Draft Wiki documentation template,"Provide a basic structure for the Wiki, including pages for setup and usage.",,documentation,,2025-04-23,2025-04-26,Core,No,
+Add logging for error tracing,Introduce logging throughout scripts to capture configuration or runtime errors.,,logging,Prototype,2025-04-23,2025-04-24,Logging,Yes,
+Support custom field fallback values,Allow fallback/default values when custom fields are missing from CSV.,,enhancement,,2025-04-25,2025-04-28,Core,No,Refactor config loader for shared use
+Test GitHub release linking capabilities,Research and implement methods to associate issues with a release in GitHub.,,research,,2025-04-25,2025-04-26,GitHub,No,
+Build sample CSV generator tool,Write a utility that generates a blank issues.csv file based on config.,,tooling,,2025-04-27,2025-04-30,Core,No,
