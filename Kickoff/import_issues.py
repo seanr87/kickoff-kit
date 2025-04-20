@@ -9,17 +9,17 @@ GITHUB_API_URL = "https://api.github.com"
 
 
 def load_config():
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[1]
     with open(root / "config.yaml", "r") as f:
         return yaml.safe_load(f)
 
 def load_ids():
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[1]
     with open(root / "ids.yaml", "r") as f:
         return yaml.safe_load(f)
 
 def load_token():
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[1]
     with open(root / "secrets.yaml", "r") as f:
         secrets = yaml.safe_load(f)
     return {

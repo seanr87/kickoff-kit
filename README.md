@@ -1,9 +1,12 @@
 # Kickoff Kit
 
-Kickoff Kit is a collection of modular scripts for automating GitHub project setup. Create repos, configure GitHub Projects, and import issues with full metadata.
+Kickoff Kit is a set of PM tools for a GitHub Repository-Project ecosystem. 
 
-## Contents
+**Principles**
+configuarble
+accessible
+modular
+documented: Wiki, logging, comments
 
-- `scripts/` – Python scripts by task
-- `sample/` – Example CSVs and configs
-- Wiki – Setup guides and usage docs
+
+

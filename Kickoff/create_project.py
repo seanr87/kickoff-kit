@@ -8,12 +8,12 @@ GITHUB_API_URL = "https://api.github.com/graphql"
 GITHUB_REST_URL = "https://api.github.com"
 
 def load_config():
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[1]
     with open(root / "config.yaml", "r") as f:
         return yaml.safe_load(f)["create_project"]
 
 def load_token():
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[1]
     with open(root / "secrets.yaml", "r") as f:
         secrets = yaml.safe_load(f)
     return {
@@ -22,7 +22,7 @@ def load_token():
     }
 
 def save_ids(data):
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[1]
     ids_file = root / "ids.yaml"
     if ids_file.exists():
         with open(ids_file, "r") as f:
