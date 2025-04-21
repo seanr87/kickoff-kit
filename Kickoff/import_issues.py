@@ -7,43 +7,34 @@ from pathlib import Path
 
 GITHUB_API_URL = "https://api.github.com"
 
-
-def load_config():
-    root = Path(__file__).resolve().parents[1]
-    with open(root / "config.yaml", "r") as f:
+def load_yaml(filename, config_dir):
+    with open(Path(config_dir) / filename, "r") as f:
         return yaml.safe_load(f)
-
-def load_ids():
-    root = Path(__file__).resolve().parents[1]
-    with open(root / "ids.yaml", "r") as f:
-        return yaml.safe_load(f)
-
-def load_token():
-    root = Path(__file__).resolve().parents[1]
-    with open(root / "secrets.yaml", "r") as f:
-        secrets = yaml.safe_load(f)
-    return {
-        "Authorization": f"Bearer {secrets['github_token']}",
-        "Accept": "application/vnd.github+json"
-    }
 
 def read_issues_csv(csv_path):
     with open(csv_path, newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         return list(reader)
 
-def create_issue(repo, issue, milestone_id, headers):
+def create_issue(repo, issue, milestone_ids, default_milestone, headers):
     url = f"{GITHUB_API_URL}/repos/{repo}/issues"
     labels = [l.strip() for l in issue.get("labels", "").split(",") if l.strip()]
     priority = issue.get("priority", "").strip()
     if priority:
         labels.append(priority)
 
+    status = issue.get("status", "").strip()
+    if status:
+        labels.append(status)
+
+    milestone_name = issue.get("milestone", "").strip()
+    milestone_id = milestone_ids.get(milestone_name, default_milestone)
+
     data = {
         "title": issue["title"],
         "body": issue.get("body", ""),
         "assignees": [a.strip() for a in issue.get("assignees", "").split(",") if a.strip()],
-        "milestone": milestone_id if issue.get("mvp", "No").lower() == "yes" else None,
+        "milestone": milestone_id,
         "labels": labels,
     }
     data = {k: v for k, v in data.items() if v}
@@ -95,27 +86,26 @@ def add_issue_to_project(project_id, content_id, field_values, headers):
     response = requests.post("https://api.github.com/graphql", headers=headers, json=mutation)
     print("✅ Issue added to project")
 
-def main():
-    config = load_config()
+def main(config_dir):
+    config = load_yaml("config.yaml", config_dir)
     cfg = config.get("import_issues", {})
     project_cfg = config.get("create_project", {})
-    headers = load_token()
-    ids = load_ids()
+    secrets = load_yaml("secrets.yaml", config_dir)
+    headers = {
+        "Authorization": f"Bearer {secrets['github_token']}",
+        "Accept": "application/vnd.github+json"
+    }
+    ids = load_yaml("ids.yaml", config_dir)
 
-    if not cfg or not project_cfg:
-        raise SystemExit("🛑 Missing 'import_issues' or 'create_project' in config.yaml")
-
-    if "issue_csv_path" not in cfg:
-        raise SystemExit("🛑 'issue_csv_path' missing from import_issues config")
-
-    issues = read_issues_csv(cfg["issue_csv_path"])
-    milestone_id = ids.get("milestone_id")
+    issues = read_issues_csv(Path(cfg["issue_csv_path"]))
+    milestone_ids = ids.get("milestone_ids", {})
+    default_milestone = ids.get("milestone_id")
     project_id = ids.get("project_id")
     field_ids = ids.get("custom_fields", {})
 
     for issue in issues:
         print(f"Creating issue: {issue['title']}")
-        issue_response = create_issue(project_cfg["repo"], issue, milestone_id, headers)
+        issue_response = create_issue(project_cfg["repo"], issue, milestone_ids, default_milestone, headers)
 
         if "id" not in issue_response:
             print("❌ Failed to create issue:", issue_response)
@@ -125,4 +115,8 @@ def main():
         add_issue_to_project(project_id, content_id, field_ids, headers)
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config-dir", required=True)
+    args = parser.parse_args()
+    main(args.config_dir)
