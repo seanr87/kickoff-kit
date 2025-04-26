@@ -18,6 +18,7 @@ import logging
 import requests
 from typing import Dict, List, Any, Optional, Tuple
 import re
+from datetime import datetime, timedelta, timezone
 
 # Configure logging
 logging.basicConfig(
@@ -690,6 +691,81 @@ def update_audit_log(github_token: str, repo_owner: str, repo_name: str, wiki_pa
         log(f"Error updating audit log: {str(e)}", "ERROR")
         return False
 
+def apply_view_filters(github_token: str, project_id: str, view_id: str, view_number: int, view_name: str) -> bool:
+    """
+    Apply filters to a GitHub Project view to hide archived and not planned issues
+    
+    Args:
+        github_token: GitHub token with repo and project access
+        project_id: ID of the GitHub Project
+        view_id: ID of the view to apply filters to
+        view_number: Number of the view
+        view_name: Name of the view (for logging)
+        
+    Returns:
+        True if filters were applied successfully, False otherwise
+    """
+    log(f"Applying filters to view: {view_name} (Number: {view_number})")
+    
+    # GitHub GraphQL mutation to update view filters
+    mutation = """
+    mutation($projectId: ID!, $viewNumber: Int!, $filter: String!) {
+      updateProjectV2View(
+        input: {
+          projectId: $projectId,
+          number: $viewNumber,
+          filter: $filter
+        }
+      ) {
+        clientMutationId
+      }
+    }
+    """
+    
+    # Define filter to hide issues with labels "Archive" or "Not Planned"
+    # Note: Filters in GitHub Projects use a specific syntax similar to search
+    filter_string = """
+    -label:"Archive" -label:"Not Planned"
+    """
+    
+    # Make the API request
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    try:
+        response = requests.post(
+            "https://api.github.com/graphql",
+            headers=headers,
+            json={
+                "query": mutation, 
+                "variables": {
+                    "projectId": project_id,
+                    "viewNumber": view_number,
+                    "filter": filter_string.strip()
+                }
+            }
+        )
+        
+        if response.status_code != 200:
+            log(f"Failed to apply filters to view: {response.text}", "ERROR")
+            return False
+            
+        data = response.json()
+        
+        if "errors" in data:
+            log(f"GraphQL errors applying filters: {data['errors']}", "ERROR")
+            return False
+        
+        log(f"Successfully applied filters to view: {view_name}", "SUCCESS")
+        return True
+        
+    except Exception as e:
+        log(f"Error applying filters to view: {str(e)}", "ERROR")
+        return False
+    
 def run_pruner(config: Dict[str, Any], github_token: str) -> Dict[str, Any]:
     """Run the pruner with the provided configuration"""
     
@@ -699,7 +775,8 @@ def run_pruner(config: Dict[str, Any], github_token: str) -> Dict[str, Any]:
         "not_planned_count": 0,
         "archived_count": 0,
         "total_processed": 0,
-        "error": None
+        "error": None,
+        "filtered_views": []
     }
     
     try:
@@ -712,7 +789,7 @@ def run_pruner(config: Dict[str, Any], github_token: str) -> Dict[str, Any]:
         # Extract repository from configuration or use default
         repo_parts = config.get("repository", "").split("/")
         repo_owner = repo_parts[0] if len(repo_parts) > 1 else None
-        repo_name = repo_parts[1] if len(repo_parts) > 1 else None
+        repo_name = repo_parts[1] if len(repo_parts) > 1 else repo_name
         
         # Get issues from project
         issues = get_project_issues(github_token, config["project_id"], config)
@@ -722,157 +799,178 @@ def run_pruner(config: Dict[str, Any], github_token: str) -> Dict[str, Any]:
         actions = []
         
         # Process not planned issues
+        not_planned_issues = [
+            issue for issue in issues
+            if issue["closed"] and issue["closed_reason"] == "not_planned"
+        ]
+        
+        result["not_planned_count"] = len(not_planned_issues)
+        log(f"Found {len(not_planned_issues)} issues to label as 'Not Planned'")
+        
+        # Apply labels if not in dry run mode
         if not config.get("dry_run", False):
-            # Find not planned issues
-            not_planned_issues = [
-                issue for issue in issues
-                if issue["closed"] and issue["closed_reason"] == "not_planned"
-            ]
-            
-            result["not_planned_count"] = len(not_planned_issues)
-            log(f"Found {len(not_planned_issues)} issues to label as 'Not Planned'")
-            
-            # Apply labels
             for issue in not_planned_issues:
-                # Extract repository owner and name
-                repo_parts = issue["repository"].split("/")
-                owner = repo_parts[0]
-                repo = repo_parts[1]
+                # Parse repository info
+                issue_repo_parts = issue["repository"].split("/")
+                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
+                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
                 
-                # Apply the label
-                if apply_label(github_token, owner, repo, issue["number"], "Not Planned"):
+                # Apply label
+                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Not Planned")
+                
+                if success:
+                    # Record action for audit log
                     actions.append({
                         "issue": issue["number"],
                         "repository": issue["repository"],
-                        "action": "Applied label: Not Planned",
-                        "reason": 'Closed with reason "not planned"',
-                        "timestamp": datetime.now().isoformat()
+                        "action": "Applied label 'Not Planned'",
+                        "reason": "Issue was closed as not planned",
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     })
-            
-            # Find issues that have been in Done status for too long
-            done_status_value = config.get("custom_fields", {}).get("done_status_value", "Done")
-            threshold_date = datetime.now() - timedelta(days=config["done_age_days"])
-            
-            old_done_issues = [
-                issue for issue in issues
-                if issue["status"] == done_status_value and 
-                   datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00")) < threshold_date
-            ]
-            
-            log(f"Found {len(old_done_issues)} issues to archive (Done for {config['done_age_days']}+ days)")
-            
-            # Apply labels to old done issues
+        
+        # Find issues that have been in Done status for too long
+        done_status_value = config.get("custom_fields", {}).get("done_status_value", "Done")
+        threshold_date = datetime.now(timezone.utc) - timedelta(days=config["done_age_days"])
+        
+        old_done_issues = []
+        for issue in issues:
+            if issue["status"] == done_status_value:
+                # Parse the updated_at date with timezone awareness
+                # Convert the string to a timezone-aware datetime object
+                updated_at = datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00"))
+                
+                # Now both dates have timezone info and can be compared safely
+                if updated_at < threshold_date:
+                    old_done_issues.append(issue)
+        
+        log(f"Found {len(old_done_issues)} issues to archive (Done for {config['done_age_days']}+ days)")
+        
+        # Apply labels if not in dry run mode
+        if not config.get("dry_run", False):
             for issue in old_done_issues:
-                repo_parts = issue["repository"].split("/")
-                owner = repo_parts[0]
-                repo = repo_parts[1]
+                # Parse repository info
+                issue_repo_parts = issue["repository"].split("/")
+                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
+                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
                 
-                if apply_label(github_token, owner, repo, issue["number"], "Archive"):
+                # Apply label
+                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Archive")
+                
+                if success:
+                    # Record action for audit log
                     actions.append({
                         "issue": issue["number"],
                         "repository": issue["repository"],
-                        "action": "Applied label: Archive",
-                        "reason": f"In '{done_status_value}' status for more than {config['done_age_days']} days",
-                        "timestamp": datetime.now().isoformat()
+                        "action": "Applied label 'Archive'",
+                        "reason": f"Issue was in Done status for over {config['done_age_days']} days",
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     })
-                    result["archived_count"] += 1
+        
+        # Find overflow issues in Done status per workstream
+        workstream_counts = {}
+        workstream_issues = {}
+        
+        # Get all issues in Done status by workstream
+        for issue in issues:
+            if issue["status"] == done_status_value:
+                workstream = issue["workstream"]
+                
+                if workstream not in workstream_counts:
+                    workstream_counts[workstream] = 0
+                    workstream_issues[workstream] = []
+                
+                workstream_counts[workstream] += 1
+                workstream_issues[workstream].append(issue)
+        
+        # Sort issues by updated_at date (oldest first)
+        for workstream in workstream_issues:
+            workstream_issues[workstream].sort(key=lambda x: datetime.fromisoformat(x["updated_at"].replace("Z", "+00:00")))
+        
+        # Find overflow issues
+        overflow_limit = config["done_overflow_limit"]
+        overflow_issues = []
+        
+        for workstream, count in workstream_counts.items():
+            if count > overflow_limit:
+                # Get the oldest issues beyond the limit
+                overflow = workstream_issues[workstream][:(count - overflow_limit)]
+                overflow_issues.extend(overflow)
+        
+        log(f"Found {len(overflow_issues)} overflow issues in Done status to archive")
+        
+        # Apply labels if not in dry run mode
+        if not config.get("dry_run", False):
+            for issue in overflow_issues:
+                # Parse repository info
+                issue_repo_parts = issue["repository"].split("/")
+                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
+                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
+                
+                # Apply label
+                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Archive")
+                
+                if success:
+                    # Record action for audit log
+                    actions.append({
+                        "issue": issue["number"],
+                        "repository": issue["repository"],
+                        "action": "Applied label 'Archive'",
+                        "reason": f"Overflow: More than {overflow_limit} issues in Done status for workstream '{issue['workstream']}'",
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+        
+        # Update the result
+        result["archived_count"] = len(old_done_issues) + len(overflow_issues)
+        
+        # Update audit log if not in dry run mode and there are actions
+        if not config.get("dry_run", False) and actions:
+            wiki_page_name = config.get("wiki_page_name", "Pruner Audit Log")
+            update_audit_log(github_token, repo_owner, repo_name, wiki_page_name, actions)
+        
+        # Apply filters to selected views if not in dry run mode
+        if not config.get("dry_run", False) and config.get("selected_views", []):
+            log("Applying filters to selected views to hide archived issues...")
             
-            # Group issues by workstream
-            workstream_groups = {}
-            for issue in issues:
-                if issue["status"] == done_status_value and issue["workstream"]:
-                    if issue["workstream"] not in workstream_groups:
-                        workstream_groups[issue["workstream"]] = []
-                    
-                    workstream_groups[issue["workstream"]].append(issue)
+            # Track which views we successfully applied filters to
+            filtered_views = []
             
-            # Process each workstream for overflow
-            for workstream, workstream_issues in workstream_groups.items():
-                if len(workstream_issues) > config["done_overflow_limit"]:
-                    # Sort by updated date (oldest first)
-                    workstream_issues.sort(key=lambda x: x["updated_at"])
-                    
-                    # Get issues to archive (beyond the limit)
-                    overflow_count = len(workstream_issues) - config["done_overflow_limit"]
-                    to_archive = workstream_issues[:overflow_count]
-                    
-                    log(f"Found {len(to_archive)} overflow issues to archive in workstream: {workstream}")
-                    
-                    # Apply labels
-                    for issue in to_archive:
-                        repo_parts = issue["repository"].split("/")
-                        owner = repo_parts[0]
-                        repo = repo_parts[1]
-                        
-                        if apply_label(github_token, owner, repo, issue["number"], "Archive"):
-                            actions.append({
-                                "issue": issue["number"],
-                                "repository": issue["repository"],
-                                "action": "Applied label: Archive",
-                                "reason": f"Overflow in '{done_status_value}' status for workstream '{workstream}'",
-                                "timestamp": datetime.now().isoformat()
-                            })
-                            result["archived_count"] += 1
-            
-            # Update audit log if there are any actions
-            if actions and config.get("wiki_page_name"):
-                update_audit_log(
-                    github_token,
-                    repo_owner or actions[0]["repository"].split("/")[0],
-                    repo_name or actions[0]["repository"].split("/")[1],
-                    config["wiki_page_name"],
-                    actions
+            for view_data in config.get("selected_views", []):
+                view_id = view_data.get("id")
+                view_name = view_data.get("name", "Unknown")
+                view_number = view_data.get("number")
+                
+                if not view_id or not view_number:
+                    log(f"Missing view ID or number for view: {view_name}", "ERROR")
+                    continue
+                
+                # Apply filters to this view
+                success = apply_view_filters(
+                    github_token=github_token,
+                    project_id=config["project_id"],
+                    view_id=view_id,
+                    view_number=view_number,
+                    view_name=view_name
                 )
-        else:
-            # Dry run mode - just count what would be done
-            not_planned_issues = [
-                issue for issue in issues
-                if issue["closed"] and issue["closed_reason"] == "not_planned"
-            ]
-            result["not_planned_count"] = len(not_planned_issues)
+                
+                if success:
+                    filtered_views.append(view_name)
             
-            done_status_value = config.get("custom_fields", {}).get("done_status_value", "Done")
-            threshold_date = datetime.now() - timedelta(days=config["done_age_days"])
-            
-            old_done_issues = [
-                issue for issue in issues
-                if issue["status"] == done_status_value and 
-                   datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00")) < threshold_date
-            ]
-            
-            # Count overflow issues per workstream
-            overflow_count = 0
-            workstream_groups = {}
-            
-            for issue in issues:
-                if issue["status"] == done_status_value and issue["workstream"]:
-                    if issue["workstream"] not in workstream_groups:
-                        workstream_groups[issue["workstream"]] = []
-                    
-                    workstream_groups[issue["workstream"]].append(issue)
-            
-            for workstream, workstream_issues in workstream_groups.items():
-                if len(workstream_issues) > config["done_overflow_limit"]:
-                    overflow_count += len(workstream_issues) - config["done_overflow_limit"]
-                    log(f"DRY RUN: Would label {len(workstream_issues) - config['done_overflow_limit']} issues as 'Archive' in workstream '{workstream}' (overflow)")
-            
-            result["archived_count"] = len(old_done_issues) + overflow_count
-            
-            log(f"DRY RUN: Would label {result['not_planned_count']} issues as 'Not Planned'")
-            log(f"DRY RUN: Would label {len(old_done_issues)} issues as 'Archive' (Done for {config['done_age_days']}+ days)")
-            log(f"DRY RUN: Would label {overflow_count} issues as 'Archive' (overflow)")
-            log(f"DRY RUN: Total issues that would be labeled: {result['not_planned_count'] + result['archived_count']}")
+            # Update the result with filtered views
+            if filtered_views:
+                log(f"Successfully applied filters to views: {', '.join(filtered_views)}", "SUCCESS")
+                result["filtered_views"] = filtered_views
+            else:
+                log("Failed to apply filters to any views", "WARNING")
         
-        # Mark as successful
         result["success"] = True
-        
+        return result
     except Exception as e:
-        log(f"Pruner failed: {str(e)}", "ERROR")
-        result["success"] = False
+        import traceback
+        log(f"Error in run_pruner: {str(e)}", "ERROR")
+        log(traceback.format_exc(), "ERROR")
         result["error"] = str(e)
-        
-    return result
-
+        return result
+    
 def setup_pruner():
     """
     Interactive setup process for pruner
@@ -935,6 +1033,28 @@ def setup_pruner():
     # Create or update config
     config = load_or_create_config(project_id, repo_owner, repo_name)
     
+    # Get project views and let user select which ones to apply filters to
+    log("\nFetching project views to determine which ones should have Pruner filters applied...")
+    views = get_project_views(github_token, project_id)
+    
+    if views:
+        selected_views = select_project_views(views)
+        
+        # Save view information to config
+        if config:
+            config["selected_views"] = [
+                {
+                    "id": view["id"],
+                    "name": view["name"],
+                    "number": view.get("number"),  # Store the view number
+                    "layout": view.get("layout_type", "Unknown")
+                }
+                for view in selected_views
+            ]
+    else:
+        log("No project views found. Will apply filters to all issues.", "WARNING")
+        config["selected_views"] = []
+    
     # Ask about dry run
     log("Would you like to run in dry run mode? (no labels will be applied) [Y/n]", "PROMPT")
     dry_run = input("> ").strip().lower() != "n"
@@ -948,6 +1068,509 @@ def setup_pruner():
             yaml.dump(config, f, default_flow_style=False)
     
     return github_token, config
+
+def get_project_views(github_token: str, project_id: str) -> List[Dict[str, Any]]:
+    """
+    Get all views (lists/boards/etc) for a GitHub Project using the GraphQL API
+    
+    Returns a list of view objects with id, title, number, and layout info
+    """
+    log(f"Fetching views for project ID: {project_id}")
+    
+    # GraphQL query to get project views
+    query = """
+    query($projectId: ID!) {
+      node(id: $projectId) {
+        ... on ProjectV2 {
+          views(first: 20) {
+            nodes {
+              id
+              name
+              number
+              layout
+              filter
+            }
+          }
+        }
+      }
+    }
+    """
+    
+    # Make the API request
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    response = requests.post(
+        "https://api.github.com/graphql",
+        headers=headers,
+        json={"query": query, "variables": {"projectId": project_id}}
+    )
+    
+    if response.status_code != 200:
+        log(f"Failed to fetch project views: {response.text}", "ERROR")
+        return []
+        
+    data = response.json()
+    
+    if "errors" in data:
+        log(f"GraphQL errors: {data['errors']}", "ERROR")
+        return []
+    
+    # Extract view information
+    views = data["data"]["node"]["views"]["nodes"]
+    
+    # Format layout types for better display
+    for view in views:
+        layout_type = view.get("layout", "")
+        if layout_type.startswith("PROJECT_V2_VIEW_LAYOUT_"):
+            view["layout_type"] = layout_type.replace("PROJECT_V2_VIEW_LAYOUT_", "").replace("_", " ").title()
+        else:
+            view["layout_type"] = layout_type
+    
+    log(f"Found {len(views)} views in project")
+    return views
+
+def select_project_views(views: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Present views to the user and allow them to select which ones to apply filters to
+    
+    Returns a list of selected view objects with id, name, number, and layout info
+    """
+    if not views:
+        log("No views found in the project", "WARNING")
+        return []
+    
+    log("\n=== Available Project Views ===", "INFO")
+    for i, view in enumerate(views, 1):
+        layout_type = view.get("layout_type", "Unknown")
+        log(f"{i}. {view['name']} ({layout_type})", "INFO")
+    
+    log("\nSelect views to apply filters to (comma-separated numbers, or 'all' for all views):", "PROMPT")
+    selection = input("> ").strip().lower()
+    
+    selected_views = []
+    
+    if selection == "all":
+        selected_views = views
+        log(f"Selected all {len(views)} views", "SUCCESS")
+    else:
+        try:
+            # Parse the selection
+            indices = [int(idx.strip()) for idx in selection.split(",") if idx.strip()]
+            
+            # Validate indices
+            valid_indices = [idx for idx in indices if 1 <= idx <= len(views)]
+            
+            if not valid_indices:
+                log("No valid selections. Using all views by default.", "WARNING")
+                selected_views = views
+            else:
+                # Get the selected views
+                selected_views = [views[idx - 1] for idx in valid_indices]
+                selected_names = [view["name"] for view in selected_views]
+                log(f"Selected views: {', '.join(selected_names)}", "SUCCESS")
+        except ValueError:
+            log("Invalid selection format. Using all views by default.", "WARNING")
+            selected_views = views
+    
+    return selected_views
+
+
+
+# Update the run_pruner function to use the selected views
+def run_pruner(config: Dict[str, Any], github_token: str) -> Dict[str, Any]:
+    """Run the pruner with the provided configuration"""
+    
+    # Initialize result
+    result = {
+        "success": False,
+        "not_planned_count": 0,
+        "archived_count": 0,
+        "total_processed": 0,
+        "error": None,
+        "views_processed": []
+    }
+    
+    try:
+        # Validate required configuration
+        required_keys = ["project_id", "done_age_days", "done_overflow_limit"]
+        for key in required_keys:
+            if key not in config:
+                raise ValueError(f"Missing required configuration: {key}")
+        
+        # Extract repository from configuration or use default
+        repo_parts = config.get("repository", "").split("/")
+        repo_owner = repo_parts[0] if len(repo_parts) > 1 else None
+        repo_name = repo_parts[1] if len(repo_parts) > 1 else None
+        
+        # Check if specific views are selected
+        selected_views = config.get("selected_views", [])
+        if selected_views:
+            view_names = [view.get("name", "Unknown") for view in selected_views]
+            log(f"Applying filters to {len(selected_views)} selected views: {', '.join(view_names)}", "INFO")
+            
+            # Track which views we've processed
+            result["views_processed"] = view_names
+            
+            # Get view IDs
+            view_ids = [view.get("id") for view in selected_views if "id" in view]
+            
+            # Get issues from project, filtered by views
+            issues = get_project_issues_by_views(github_token, config["project_id"], config, view_ids)
+        else:
+            log("No specific views selected, applying filters to all issues", "INFO")
+            # Get all issues from project
+            issues = get_project_issues(github_token, config["project_id"], config)
+        
+        result["total_processed"] = len(issues)
+        
+        # Process not planned issues
+        not_planned_issues = [
+            issue for issue in issues
+            if issue["closed"] and issue["closed_reason"] == "not_planned"
+        ]
+        
+        result["not_planned_count"] = len(not_planned_issues)
+        log(f"Found {len(not_planned_issues)} issues to label as 'Not Planned'")
+        
+        # Apply labels if not in dry run mode
+        actions = []  # For audit log
+        
+        if not config.get("dry_run", False):
+            for issue in not_planned_issues:
+                # Parse repository info
+                issue_repo_parts = issue["repository"].split("/")
+                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
+                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
+                
+                # Apply label
+                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Not Planned")
+                
+                if success:
+                    # Record action for audit log
+                    actions.append({
+                        "issue": issue["number"],
+                        "repository": issue["repository"],
+                        "action": "Applied label 'Not Planned'",
+                        "reason": "Issue was closed as not planned",
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+        
+        # Find issues that have been in Done status for too long
+        done_status_value = config.get("custom_fields", {}).get("done_status_value", "Done")
+        threshold_date = datetime.now(timezone.utc) - timedelta(days=config["done_age_days"])
+        
+        old_done_issues = []
+        for issue in issues:
+            if issue["status"] == done_status_value:
+                # Parse the updated_at date with timezone awareness
+                updated_at = datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00"))
+                
+                # Now both dates have timezone info and can be compared safely
+                if updated_at < threshold_date:
+                    old_done_issues.append(issue)
+        
+        log(f"Found {len(old_done_issues)} issues to archive (Done for {config['done_age_days']}+ days)")
+        
+        # Apply labels if not in dry run mode
+        if not config.get("dry_run", False):
+            for issue in old_done_issues:
+                # Parse repository info
+                issue_repo_parts = issue["repository"].split("/")
+                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
+                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
+                
+                # Apply label
+                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Archive")
+                
+                if success:
+                    # Record action for audit log
+                    actions.append({
+                        "issue": issue["number"],
+                        "repository": issue["repository"],
+                        "action": "Applied label 'Archive'",
+                        "reason": f"Issue was in Done status for over {config['done_age_days']} days",
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+        
+        # Find overflow issues in Done status per workstream
+        workstream_counts = {}
+        workstream_issues = {}
+        
+        # Get all issues in Done status by workstream
+        for issue in issues:
+            if issue["status"] == done_status_value:
+                workstream = issue["workstream"]
+                
+                if workstream not in workstream_counts:
+                    workstream_counts[workstream] = 0
+                    workstream_issues[workstream] = []
+                
+                workstream_counts[workstream] += 1
+                workstream_issues[workstream].append(issue)
+        
+        # Sort issues by updated_at date (oldest first)
+        for workstream in workstream_issues:
+            workstream_issues[workstream].sort(key=lambda x: datetime.fromisoformat(x["updated_at"].replace("Z", "+00:00")))
+        
+        # Find overflow issues
+        overflow_limit = config["done_overflow_limit"]
+        overflow_issues = []
+        
+        for workstream, count in workstream_counts.items():
+            if count > overflow_limit:
+                # Get the oldest issues beyond the limit
+                overflow = workstream_issues[workstream][:(count - overflow_limit)]
+                overflow_issues.extend(overflow)
+        
+        log(f"Found {len(overflow_issues)} overflow issues in Done status to archive")
+        
+        # Apply labels if not in dry run mode
+        if not config.get("dry_run", False):
+            for issue in overflow_issues:
+                # Parse repository info
+                issue_repo_parts = issue["repository"].split("/")
+                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
+                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
+                
+                # Apply label
+                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Archive")
+                
+                if success:
+                    # Record action for audit log
+                    actions.append({
+                        "issue": issue["number"],
+                        "repository": issue["repository"],
+                        "action": "Applied label 'Archive'",
+                        "reason": f"Overflow: More than {overflow_limit} issues in Done status for workstream '{issue['workstream']}'",
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+        
+        # Update the result
+        result["archived_count"] = len(old_done_issues) + len(overflow_issues)
+        
+        # Update audit log if not in dry run mode and there are actions
+        if not config.get("dry_run", False) and actions:
+            wiki_page_name = config.get("wiki_page_name", "Pruner Audit Log")
+            update_audit_log(github_token, repo_owner, repo_name, wiki_page_name, actions)
+        
+        result["success"] = True
+        return result
+    except Exception as e:
+        import traceback
+        log(f"Error in run_pruner: {str(e)}", "ERROR")
+        log(traceback.format_exc(), "ERROR")
+        result["error"] = str(e)
+        return result
+
+
+def get_project_issues_by_views(github_token: str, project_id: str, config: Dict[str, Any], 
+                               view_ids: List[str]) -> List[Dict[str, Any]]:
+    """
+    Get all issues from specific views in a GitHub Project
+    
+    Args:
+        github_token: GitHub token with repo and project access
+        project_id: ID of the GitHub Project
+        config: Pruner configuration dictionary
+        view_ids: List of view IDs to get issues from
+        
+    Returns:
+        List of issue objects with metadata
+    """
+    log(f"Fetching issues from {len(view_ids)} selected views")
+    
+    # Get project fields info
+    fields, workstream_options = get_project_fields(github_token, project_id)
+    
+    # Extract field IDs needed for processing
+    workstream_field_id = config.get("custom_fields", {}).get("workstream_field_id", "Workstream")
+    status_field_id = config.get("custom_fields", {}).get("status_field_id", "Status")
+    
+    # Get all project views to map IDs to numbers
+    all_views = get_project_views(github_token, project_id)
+    view_id_to_number = {}
+    view_id_to_name = {}
+    
+    for view in all_views:
+        if "id" in view:
+            # Create mapping from ID to view number and name
+            view_id_to_number[view["id"]] = view.get("number")
+            view_id_to_name[view["id"]] = view.get("name", "Unknown View")
+    
+    # Store all issues with issue number as key to prevent duplicates
+    all_issues = []
+    
+    for view_id in view_ids:
+        # Get the view name and number for this view ID
+        view_name = view_id_to_name.get(view_id, "Selected View")
+        view_number = view_id_to_number.get(view_id)
+        
+        if not view_number:
+            log(f"Could not find view number for view ID: {view_id}", "ERROR")
+            continue
+            
+        log(f"Fetching issues from view: {view_name}")
+        
+        # GraphQL query for items in a specific view
+        # We need to query by view number, not ID
+        query = """
+        query($projectId: ID!, $viewNumber: Int!, $cursor: String) {
+          node(id: $projectId) {
+            ... on ProjectV2 {
+              view(number: $viewNumber) {
+                name
+              }
+              items(first: 100, after: $cursor) {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+                nodes {
+                  id
+                  content {
+                    ... on Issue {
+                      id
+                      number
+                      title
+                      state
+                      stateReason
+                      updatedAt
+                      labels(first: 10) {
+                        nodes {
+                          name
+                        }
+                      }
+                      repository {
+                        name
+                        owner {
+                          login
+                        }
+                      }
+                    }
+                  }
+                  fieldValues(first: 20) {
+                    nodes {
+                      ... on ProjectV2ItemFieldTextValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        text
+                      }
+                      ... on ProjectV2ItemFieldDateValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        date
+                      }
+                      ... on ProjectV2ItemFieldSingleSelectValue {
+                        field { ... on ProjectV2FieldCommon { name } }
+                        name
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        
+        # Process each view with pagination
+        has_next_page = True
+        cursor = None
+        view_issues = []
+        
+        while has_next_page:
+            # Make the API request
+            headers = {
+                "Authorization": f"Bearer {github_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            
+            response = requests.post(
+                "https://api.github.com/graphql",
+                headers=headers,
+                json={"query": query, "variables": {
+                    "projectId": project_id, 
+                    "viewNumber": view_number,
+                    "cursor": cursor
+                }}
+            )
+            
+            if response.status_code != 200:
+                log(f"Failed to fetch view items: {response.text}", "ERROR")
+                break
+                
+            data = response.json()
+            
+            if "errors" in data:
+                log(f"GraphQL errors: {data['errors']}", "ERROR")
+                break
+            
+            # Check if we got valid data
+            if "data" not in data or "node" not in data["data"]:
+                log(f"Invalid response format for view {view_name}", "ERROR")
+                break
+                
+            # Get items in this page
+            items_data = data["data"]["node"]["items"]
+            
+            # Process items
+            page_count = 0
+            for item in items_data["nodes"]:
+                # Skip non-issue items
+                if not item["content"] or "number" not in item["content"]:
+                    continue
+                    
+                issue = item["content"]
+                
+                # Extract custom field values
+                field_values = {}
+                for field_value in item["fieldValues"]["nodes"]:
+                    if field_value.get("field") and field_value["field"].get("name"):
+                        field_name = field_value["field"]["name"]
+                        field_values[field_name] = field_value.get("text") or field_value.get("date") or field_value.get("name")
+                
+                # Get workstream and status values
+                workstream = field_values.get(workstream_field_id, "Unknown")
+                status = field_values.get(status_field_id, "Unknown")
+                
+                # Build issue object
+                issue_obj = {
+                    "number": issue["number"],
+                    "title": issue["title"],
+                    "status": status,
+                    "workstream": workstream,
+                    "closed": issue["state"] == "CLOSED",
+                    "closed_reason": issue["stateReason"],
+                    "updated_at": issue["updatedAt"],
+                    "labels": [label["name"] for label in issue["labels"]["nodes"]],
+                    "repository": f"{issue['repository']['owner']['login']}/{issue['repository']['name']}",
+                    "view_name": view_name  # Add the view name for reference
+                }
+                
+                view_issues.append(issue_obj)
+                page_count += 1
+            
+            # Update counters and check for next page
+            has_next_page = items_data["pageInfo"]["hasNextPage"]
+            cursor = items_data["pageInfo"]["endCursor"] if has_next_page else None
+        
+        log(f"Found {len(view_issues)} issues in view: {view_name}")
+        all_issues.extend(view_issues)
+    
+    # Remove duplicates (same issue might appear in multiple views)
+    unique_issues = {}
+    for issue in all_issues:
+        key = f"{issue['repository']}#{issue['number']}"
+        if key not in unique_issues:
+            unique_issues[key] = issue
+    
+    issues = list(unique_issues.values())
+    log(f"Total unique issues across selected views: {len(issues)}")
+    return issues
+
 
 def main():
     # Parse command line arguments
@@ -996,9 +1619,14 @@ def main():
             log(f"Labeled {result['not_planned_count']} issues as \"Not Planned\"", "INFO")
             log(f"Labeled {result['archived_count']} issues as \"Archive\"", "INFO")
             log(f"Total issues processed: {result['total_processed']}", "INFO")
+            
+            # Report on filtered views
+            if "filtered_views" in result and result["filtered_views"]:
+                log(f"Applied filters to {len(result['filtered_views'])} views: {', '.join(result['filtered_views'])}", "SUCCESS")
         else:
             log(f"Pruner failed: {result['error']}", "ERROR")
             sys.exit(1)
+
         
     except KeyboardInterrupt:
         print("\n")
