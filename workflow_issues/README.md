@@ -1,98 +1,86 @@
-# GitHub Issues Creator
+# GitHub Issues CSV Importer
 
-An interactive tool for bulk creating GitHub Issues from CSV files with proper Project field assignment.
+A streamlined tool for creating GitHub Issues from CSV data and synchronizing custom fields with GitHub Projects.
 
-## Features
+## Overview
 
-- Analyze CSV files and GitHub Projects to identify fields and options
-- Interactive prompts for creating missing fields and options
-- Create a sample issue for verification before bulk creation
-- Automatically populate custom fields in GitHub Projects
-- Proper handling of standard fields (title, body, assignees, labels, milestone)
-- Support for custom fields with dynamic option creation
-
-## Project Structure
-
-```
-.
-├── issues.py              # Main orchestrator script
-├── issues/                # Supporting modules
-│   ├── __init__.py        # Package initialization
-│   ├── analyzer.py        # CSV and Project analysis
-│   ├── creator.py         # Issue and field creation
-│   └── validator.py       # Input validation
-└── secrets.yaml           # Configuration file (not included)
-```
-
-## Requirements
-
-- Python 3.6+
-- GitHub Personal Access Token with appropriate permissions:
-  - `repo` - Full control of private repositories
-  - `project` - Full control of organization projects
-  - `admin:org` - Full control of orgs and teams (if using organization projects)
+This tool automates the process of creating GitHub Issues from structured CSV data while preserving all field relationships by mapping them to GitHub Projects fields. It handles standard issue fields, custom fields, and field options with minimal user intervention.
 
 ## Installation
 
 1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/github-issues-creator.git
-   cd github-issues-creator
+   ```
+   git clone https://github.com/yourusername/github-issues-csv-importer.git
+   cd github-issues-csv-importer
    ```
 
-2. Create a virtual environment and install dependencies:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   pip install requests pyyaml
-   ```
-
-3. Create a `secrets.yaml` file with your GitHub token:
+2. Create a configuration directory with a `secrets.yaml` file:
    ```yaml
-   github_token: ghp_your_token_here
+   # secrets.yaml
+   github_token: your_github_personal_access_token
    ```
+
+   > **Note**: Your GitHub token needs permissions for repository and project access.
 
 ## CSV Format
 
-Your CSV file should include at minimum a `title` column. Additional supported columns:
+Your CSV file must include a `title` column and can contain the following:
 
-- `body` - Issue description
-- `assignees` - Comma-separated list of GitHub usernames
-- `labels` - Comma-separated list of label names
-- `milestone` - Milestone name
-- `status` - Status value for the Project board
+### Standard Fields
+- `title` (required): The issue title
+- `body`: The issue description 
+- `assignees`: Comma-separated usernames
+- `labels`: Comma-separated label names
+- `milestone`: Milestone name
+- `status`: Project status (Todo, In Progress, Done, etc.)
 
-Any other columns will be treated as custom fields for the GitHub Project.
+### Custom Fields
+Any additional columns will be treated as custom fields and synchronized with your GitHub Project.
 
-Example CSV:
-```csv
-title,body,status,workstream,milestone
-Fix login bug,Users can't login on mobile devices,To Do,Backend,May 2025
-Update docs,Documentation needs to be updated,In Progress,Documentation,May 2025
-```
+### Date Fields
+The following fields are automatically handled as date fields:
+- `end date`
+- `due date`
+- `start date`
+- `deadline`
 
 ## Usage
 
-Run the script with required parameters:
+Run the tool with the following command:
 
-```bash
+```
 python issues.py --config-dir ./config --csv ./issues.csv --repo-url https://github.com/owner/repo --project-url https://github.com/orgs/owner/projects/1
 ```
 
-The script will:
-1. Analyze the CSV and GitHub Project structure
-2. Provide interactive prompts for field creation/modification
-3. Create a sample issue for verification
-4. Ask for confirmation before bulk creation
-5. Create all issues with proper field values
-
-## Command Line Arguments
+### Parameters
 
 - `--config-dir`: Directory containing the secrets.yaml file
-- `--csv`: Path to the CSV file with issue data
-- `--repo-url`: GitHub repository URL (format: https://github.com/owner/repo)
-- `--project-url`: GitHub project URL (format: https://github.com/orgs/owner/projects/number)
+- `--csv`: Path to your CSV file with issue data
+- `--repo-url`: GitHub repository URL where issues will be created
+- `--project-url`: GitHub project URL where issues will be added
+
+## Workflow
+
+1. **Validation**: The tool validates your CSV file format and GitHub URLs
+2. **Analysis**: The tool analyzes your CSV fields and the GitHub Project structure
+3. **Field Creation**: You'll be prompted to confirm creation of any missing fields
+4. **Sample Issue**: A sample issue is created for verification
+5. **Confirmation**: You confirm whether to proceed with creating all issues
+6. **Bulk Creation**: All remaining issues are created and added to the project
+
+## Troubleshooting
+
+- Ensure your GitHub token has sufficient permissions
+- Verify that your CSV file contains a "title" column
+- For custom fields with many options, consider adding them manually in the GitHub UI
+- Check that your repository and project URLs are correctly formatted
+
+## Limitations
+
+- Maximum of 50 options per custom field (GitHub limitation)
+- Field and option names must be 50 characters or less
+- The tool cannot modify existing fields, only add new ones
 
 ## License
 
-MIT
+[MIT License](LICENSE)
