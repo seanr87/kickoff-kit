@@ -1,198 +1,188 @@
-# scripts/create_project/create_project.py
+# create_project.py
 
 import requests
 import yaml
 from pathlib import Path
 
-GITHUB_API_URL = "https://api.github.com/graphql"
-GITHUB_REST_URL = "https://api.github.com"
+GRAPHQL_URL = "https://api.github.com/graphql"
+GITHUB_API_URL = "https://api.github.com"
 
-def load_config():
-    root = Path(__file__).resolve().parents[1]
-    with open(root / "config.yaml", "r") as f:
-        return yaml.safe_load(f)["create_project"]
+def load_yaml(filename, config_dir):
+    with open(Path(config_dir) / filename, "r") as f:
+        return yaml.safe_load(f)
 
-def load_token():
-    root = Path(__file__).resolve().parents[1]
-    with open(root / "secrets.yaml", "r") as f:
-        secrets = yaml.safe_load(f)
+def save_yaml(filename, data, config_dir):
+    with open(Path(config_dir) / filename, "w") as f:
+        yaml.dump(data, f)
+
+def get_user_id(headers):
+    query = { "query": "query { viewer { id } }" }
+    res = requests.post(GRAPHQL_URL, headers=headers, json=query)
+    return res.json()["data"]["viewer"]["id"]
+
+def create_project(owner_id, title, headers):
+    query = {
+        "query": """
+        mutation($input: CreateProjectV2Input!) {
+          createProjectV2(input: $input) {
+            projectV2 {
+              id
+            }
+          }
+        }
+        """,
+        "variables": {
+            "input": {
+                "ownerId": owner_id,
+                "title": title
+            }
+        }
+    }
+    res = requests.post(GRAPHQL_URL, headers=headers, json=query)
+    print(res.status_code, res.text)
+    return res.json()["data"]["createProjectV2"]["projectV2"]["id"]
+
+def create_field(project_id, name, ftype, headers, options=None):
+    payload = {
+        "query": """
+        mutation($input: CreateProjectV2FieldInput!) {
+          createProjectV2Field(input: $input) {
+            projectV2Field {
+              ... on ProjectV2FieldCommon {
+                id
+                name
+              }
+              ... on ProjectV2SingleSelectField {
+                options {
+                  id
+                  name
+                }
+              }
+            }
+          }
+        }
+        """,
+        "variables": {
+            "input": {
+                "projectId": project_id,
+                "name": name,
+                "dataType": ftype
+            }
+        }
+    }
+
+    if ftype == "SINGLE_SELECT":
+        payload["variables"]["input"]["singleSelectOptions"] = [
+            {"name": opt, "description": "", "color": "GRAY"} for opt in options
+        ]
+
+    res = requests.post(GRAPHQL_URL, headers=headers, json=payload)
+    print(res.status_code, res.text)
+    data = res.json()["data"]["createProjectV2Field"]["projectV2Field"]
+    print(f"✅ Added field: {name} ({ftype})")
+    return data
+
+def get_field_option_ids(project_id, headers):
+    query = {
+        "query": """
+        query($projectId: ID!) {
+          node(id: $projectId) {
+            ... on ProjectV2 {
+              fields(first: 100) {
+                nodes {
+                  __typename
+                  ... on ProjectV2SingleSelectField {
+                    id
+                    name
+                    options {
+                      id
+                      name
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """,
+        "variables": {"projectId": project_id}
+    }
+    response = requests.post(GRAPHQL_URL, headers=headers, json=query)
+    nodes = response.json()["data"]["node"]["fields"]["nodes"]
+
     return {
+        field["name"]: {
+            "field_id": field["id"],
+            "options": {opt["name"]: opt["id"] for opt in field["options"]}
+        }
+        for field in nodes if field["__typename"] == "ProjectV2SingleSelectField"
+    }
+
+def create_or_get_milestone(repo, headers):
+    title = "Prototype"
+    res = requests.post(f"{GITHUB_API_URL}/repos/{repo}/milestones", headers=headers, json={"title": title})
+    if res.status_code == 201:
+        print(f"✅ Milestone created: {title}")
+        return res.json()["number"]
+    elif res.status_code == 422:
+        # Already exists—fetch it
+        r = requests.get(f"{GITHUB_API_URL}/repos/{repo}/milestones", headers=headers)
+        for m in r.json():
+            if m["title"] == title:
+                print(f"ℹ️ Using existing milestone: {title}")
+                return m["number"]
+    print("❌ Could not resolve milestone")
+    return None
+
+def main(config_dir):
+    config = load_yaml("config.yaml", config_dir)
+    cfg = config.get("create_project", {})
+    secrets = load_yaml("secrets.yaml", config_dir)
+    headers = {
         "Authorization": f"Bearer {secrets['github_token']}",
         "Accept": "application/vnd.github+json"
     }
 
-def save_ids(data):
-    root = Path(__file__).resolve().parents[1]
-    ids_file = root / "ids.yaml"
-    if ids_file.exists():
-        with open(ids_file, "r") as f:
-            current = yaml.safe_load(f)
-    else:
-        current = {}
-    current.update(data)
-    with open(ids_file, "w") as f:
-        yaml.dump(current, f)
-
-def get_user_or_org_id(login, headers):
-    query = """
-    query($login: String!) {
-      user(login: $login) {
-        id
-      }
-      organization(login: $login) {
-        id
-      }
-    }
-    """
-    response = requests.post(GITHUB_API_URL, headers=headers, json={"query": query, "variables": {"login": login}})
-    print("PROJECT CREATE RESPONSE:", response.status_code, response.text)
-    print(response.status_code, response.text)
-    data = response.json()["data"]
-    return data["user"]["id"] if data["user"] else data["organization"]["id"]
-
-def get_repo_node_id(repo, headers):
-    url = f"{GITHUB_REST_URL}/repos/{repo}"
-    response = requests.get(url, headers=headers)
-    return response.json().get("node_id")
-
-def link_project_to_repo(project_id, repo_node_id, headers):
-    query = """
-    mutation($input: LinkProjectV2ToRepositoryInput!) {
-      linkProjectV2ToRepository(input: $input) {
-        clientMutationId
-      }
-    }
-    """
-    variables = {
-        "input": {
-            "projectId": project_id,
-            "repositoryId": repo_node_id
-        }
-    }
-    response = requests.post(GITHUB_API_URL, headers=headers, json={"query": query, "variables": variables})
-    print("PROJECT LINK RESPONSE:", response.status_code, response.text)
-    return response.json()
-
-def create_project(owner_id, title, description, headers):
-    query = """
-    mutation($input: CreateProjectV2Input!) {
-      createProjectV2(input: $input) {
-        projectV2 {
-          id
-        }
-      }
-    }
-    """
-    variables = {
-        "input": {
-            "ownerId": owner_id,
-            "title": title,
-        }
-    }
-    response = requests.post(GITHUB_API_URL, headers=headers, json={"query": query, "variables": variables})
-    print("PROJECT CREATE RESPONSE:", response.status_code, response.text)
-    return response.json()
-
-def create_project_field(project_id, name, field_type, headers, options=None):
-    mutation = """
-    mutation($input: CreateProjectV2FieldInput!) {
-        createProjectV2Field(input: $input) {
-            projectV2Field {
-                ... on ProjectV2FieldCommon {
-                    id
-                    name
-                }
-            }
-        }
-    }
-    """
-
-    input_data = {
-        "projectId": project_id,
-        "name": name,
-        "dataType": field_type
-    }
-    if field_type == "SINGLE_SELECT" and options:
-        input_data["singleSelectOptions"] = [
-            {"name": opt, "description": "", "color": "GRAY"} for opt in options
-        ]
-
-    print("FIELD CREATE PAYLOAD:", input_data)
-    response = requests.post(GITHUB_API_URL, headers=headers, json={"query": mutation, "variables": {"input": input_data}})
-    print("FIELD CREATE RESPONSE:", response.status_code, response.text)
-    return response.json()
-
-def create_milestone(repo, title, headers):
-    url = f"{GITHUB_REST_URL}/repos/{repo}/milestones"
-    response = requests.post(url, headers=headers, json={"title": title})
-    return response.json()
-
-def create_release(repo, tag, name, body, milestone_number, headers):
-    url = f"{GITHUB_REST_URL}/repos/{repo}/releases"
-    payload = {
-        "tag_name": tag,
-        "name": name,
-        "body": body,
-        "target_commitish": "main"
-    }
-    response = requests.post(url, headers=headers, json=payload)
-    return response.json()
-
-def main():
-    cfg = load_config()
-    headers = load_token()
-    owner_login = cfg["repo"].split("/")[0]
-
-    print("\n[1] Creating milestone...")
-    milestone = create_milestone(cfg["repo"], cfg["milestone_title"], headers)
-    print("Milestone created:", milestone.get("title"))
-
-    print("\n[2] Creating release...")
-    release = create_release(
-        cfg["repo"],
-        cfg["release_tag"],
-        cfg["release_name"],
-        cfg["release_description"],
-        milestone.get("number"),
-        headers
-    )
-    print("Release created:", release.get("tag_name"))
-
-    print("\n[3] Getting owner ID...")
-    owner_id = get_user_or_org_id(owner_login, headers)
-    print("Owner ID:", owner_id)
-
-    print("\n[4] Creating GitHub Project...")
-    project = create_project(owner_id, cfg["project_title"], cfg["project_description"], headers)
-    project_id = project["data"]["createProjectV2"]["projectV2"]["id"]
-    print("Project created with ID:", project_id)
-
-    print("\n[5] Linking project to repo...")
-    repo_node_id = get_repo_node_id(cfg["repo"], headers)
-    link_project_to_repo(project_id, repo_node_id, headers)
+    owner_id = get_user_id(headers)
+    project_id = create_project(owner_id, cfg["project_title"], headers)
 
     field_ids = {}
+    select_options = {}
+
     for field in cfg.get("custom_fields", []):
         name = field["name"]
         ftype = field["type"].upper()
-        options = field.get("options")
-        print(f"Adding field: {name} ({ftype})")
-        result = create_project_field(project_id, name, ftype, headers, options)
+        options = field.get("options", [])
 
-        if "data" not in result:
-            print("FIELD CREATE ERROR:", result)
-            raise SystemExit("🛑 Failed to create field. See above.")
+        field_data = create_field(project_id, name, ftype, headers, options)
+        field_ids[name] = field_data["id"]
 
-        field_id = result["data"]["createProjectV2Field"]["projectV2Field"]["id"]
-        field_ids[name] = field_id
+        if ftype == "SINGLE_SELECT":
+            select_options[name] = {opt["name"]: opt["id"] for opt in field_data["options"]}
 
-    save_ids({
-        "milestone_id": milestone.get("id"),
-        "release_id": release.get("id"),
+    all_fields = get_field_option_ids(project_id, headers)
+    status_info = all_fields.get("Status", {})
+
+    repo = cfg["repo"]
+    milestone_number = create_or_get_milestone(repo, headers)
+
+    ids_data = {
         "project_id": project_id,
-        "custom_fields": field_ids
-    })
-    print("\n✅ Project setup complete. IDs saved to ids.yaml")
+        "custom_fields": field_ids,
+        "select_options": {
+            **select_options,
+            "status": status_info.get("options", {})
+        },
+        "status_field_id": status_info.get("field_id"),
+        "milestone_number": milestone_number
+    }
+
+    save_yaml("ids.yaml", ids_data, config_dir)
+    print("✅ Project setup complete. IDs saved to ids.yaml")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config-dir", required=True)
+    args = parser.parse_args()
+    main(args.config_dir)
