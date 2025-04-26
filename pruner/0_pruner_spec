@@ -1,0 +1,145 @@
+= SPEC-1: Pruner GitHub Project Manager
+:sectnums:
+:toc:
+
+== Background
+
+As GitHub Project boards grow, they become cluttered with closed, outdated, or irrelevant Issues, making active project management harder. Manual pruning is tedious, error-prone, and can risk accidental data loss. "Pruner" automates the archival process by labeling — not deleting — Issues based on customizable rules, ensuring the board stays clean without compromising data integrity.
+
+== Requirements
+
+*Must Have:*
+- Automatically scan GitHub Projects for all Issues and metadata (status, closed reason, closed date, workstream).
+- Apply labels (`Not Planned`, `Archive`) based on defined rules.
+- Ensure no Issues are ever deleted.
+- Update Project board filters to hide labeled Issues from view.
+- Maintain an audit log of all labeling actions (who, what, when).
+
+*Should Have:*
+- Allow easy adjustment of label rules (e.g., change "2 weeks" to a different threshold).
+- Support multiple workstreams independently.
+
+*Could Have:*
+- Notify users of auto-labeling via GitHub comments or notifications.
+
+*Won't Have:*
+- Automatic deletion of any Issues.
+- Manual prompting for every Issue decision.
+
+== Method
+
+The Pruner system will be implemented as a GitHub Action for easy installation and maintenance. It will operate fully within the GitHub ecosystem, requiring minimal technical knowledge to set up.
+
+=== Architecture
+
+[plantuml]
+----
+@startuml
+actor User
+User --> GitHub Action : Installs via Marketplace or .yml
+GitHub Action --> GitHub API : Scan Issues and Project metadata
+GitHub Action --> GitHub API : Apply Labels ("Not Planned", "Archive")
+GitHub Action --> Wiki Page : Append Audit Log entries
+GitHub Action --> GitHub Project Filters : Update views to hide labeled Issues
+@enduml
+----
+
+=== Key Components
+
+- **GitHub Action**:
+  - Runs on a schedule (daily or weekly via `cron` triggers).
+  - Pulls Issues and metadata using GitHub REST API v3.
+  - Applies Labels based on rules (e.g., Done for 2+ weeks or overflow of Done Issues).
+  - Updates Project board filters to exclude `Not Planned` and `Archive` Issues.
+
+- **Audit Logging**:
+  - Updates a Wiki page (e.g., `Pruner Audit Log`) for every labeling action.
+  - Logs include Issue ID, action taken, timestamp, and reason.
+
+- **Configuration**:
+  - Users configure basic options (e.g., Done age threshold, overflow count) via a simple YAML file (`.pruner-config.yml`).
+
+- **Error Handling**:
+  - Graceful failure and recovery if GitHub API calls fail.
+  - Dry-run mode for testing without applying labels.
+
+- **Security**:
+  - Uses GitHub-provided authentication (GITHUB_TOKEN) to avoid manual token setup.
+
+== Implementation
+
+1. **Initial Setup**
+   - Create a GitHub Action in a dedicated repository (`pruner-action`).
+   - Define Action inputs (e.g., `age_threshold_days`, `overflow_limit`, `project_id`).
+   - Implement a GitHub REST API client to:
+     - Fetch Issues and Project board metadata.
+     - Apply Labels (`Not Planned`, `Archive`) based on business rules.
+     - Update Project board filters to hide labeled Issues.
+   - Write audit log updates to a new or existing Wiki page (`Pruner Audit Log`).
+
+2. **Configuration**
+   - Create `.pruner-config.yml` for user customization:
+     ```yaml
+     project_id: 7
+     done_age_days: 14
+     done_overflow_limit: 3
+     wiki_page_name: Pruner Audit Log
+     dry_run: false
+     ```
+
+3. **Testing**
+   - Deploy on the test repository `MAIgnus_CAIrlsen`.
+   - Validate all label applications and Wiki audit logging.
+   - Conduct dry-run tests before full labeling is enabled.
+
+4. **Packaging**
+   - Publish the GitHub Action to the GitHub Marketplace.
+   - Write clear README instructions for setup, configuration, and troubleshooting.
+
+5. **Release**
+   - Announce open beta for early adopters.
+
+== Milestones
+
+1. **MVP Development** (Week 1-2)
+   - Create initial GitHub Action scaffold.
+   - Implement Issue scanning and metadata extraction.
+   - Apply basic labeling rules (`Not Planned`, `Archive`).
+
+2. **Audit Log Integration** (Week 3)
+   - Implement writing updates to the Repository Wiki.
+   - Design audit entry format (Issue ID, action, timestamp, reason).
+
+3. **Configuration Support** (Week 3-4)
+   - Create `.pruner-config.yml` schema.
+   - Parse user configuration and apply during runs.
+
+4. **Testing and Validation** (Week 5)
+   - Deploy in the test repository and project.
+   - Validate labeling logic, audit log updates, and filter hiding.
+   - Test dry-run mode.
+
+5. **Marketplace Publishing** (Week 6)
+   - Finalize GitHub Action metadata.
+   - Publish on GitHub Marketplace with clear setup guides.
+
+== Gathering Results
+
+After deployment, the success of the Pruner system will be evaluated based on:
+
+- **Audit Log Review**:
+  - Verify that every auto-labeled Issue is correctly recorded in the Repository Wiki with accurate timestamps and reasons.
+
+- **Board Cleanliness**:
+  - Confirm that old, irrelevant, and non-actionable Issues are effectively hidden from Project views without manual intervention.
+
+- **Data Integrity**:
+  - Ensure no Issues are deleted, and all remain accessible for audit or recovery.
+
+- **User Feedback**:
+  - Collect feedback from initial testers on usability, clarity of configuration, and effectiveness.
+
+- **Error Monitoring**:
+  - Track and address any API errors, audit logging failures, or mislabeling incidents during the pilot phase.
+
+The system will be considered successfully implemented if 95%+ of irrelevant Issues are hidden within the first scheduled runs, no data loss occurs, and users report improved board manageability.

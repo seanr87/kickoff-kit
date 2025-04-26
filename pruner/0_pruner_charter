@@ -1,0 +1,21 @@
+# Project Charter: Pruner
+
+## Purpose
+Automatically manage GitHub Project boards by labeling — not deleting — old, irrelevant, or non-actionable Issues to keep boards clean and focused.
+
+## User Experience
+- **No Issues are ever deleted**.
+- **Users do not manually intervene** to prune Issues.
+- **Old or irrelevant Issues** automatically **disappear** from view via label-based filters.
+- **All Issues remain accessible** for auditing or recovery.
+
+## Workflow
+1. **Scan GitHub Project**:
+   - Pull all Issues and metadata: status, closed reason, closed date, and workstream.
+2. **Apply Labels**:
+   - `Not Planned`: Closed with reason "not planned."
+   - `Archive`: 
+     - In `Done` for 2+ weeks, **or**
+     - More than 3 Issues in `Done` per workstream (label oldest first).
+3. **Update Filters**:
+   - Exclude Issues with `Not Planned` or `Archive` labels from the Project board view.

@@ -1,0 +1,14 @@
+
+
+## Development 
+Claude 
+
+Please be as concise as possible while ensuring clarity.
+
+When troubleshooting, feed only the functions or sections that need to be replaced and carefully explain precisely where the code to remove is.
+
+Principles:
+- accessible for non coders
+- configurable
+- modular
+- documented: Wiki, logging, comments

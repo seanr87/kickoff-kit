@@ -1,0 +1,47 @@
+name: Pruner - Project Board Manager
+
+on:
+  schedule:
+    # Run daily at midnight
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # Allow manual triggering
+    inputs:
+      dry-run:
+        description: 'Run without applying labels (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  prune-issues:
+    runs-on: ubuntu-latest
+    name: Prune GitHub Project Issues
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          
+      - name: Load configuration
+        id: config
+        run: |
+          if [ -f .pruner-config.yml ]; then
+            echo "::set-output name=config::$(cat .pruner-config.yml | base64 -w 0)"
+          else
+            echo "::set-output name=config::$(echo '{
+              "project_id": ${{ github.event.repository.projects.0.id }},
+              "done_age_days": 14,
+              "done_overflow_limit": 3,
+              "wiki_page_name": "Pruner Audit Log",
+              "dry_run": ${{ github.event.inputs.dry-run || false }}
+            }' | base64 -w 0)"
+          fi
+
+      - name: Run Pruner
+        uses: your-org/pruner-action@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          config-base64: ${{ steps.config.outputs.config }}

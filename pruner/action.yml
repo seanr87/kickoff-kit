@@ -1,0 +1,20 @@
+name: 'Pruner - GitHub Project Manager'
+description: 'Automatically manage GitHub Project boards by labeling issues based on customizable rules'
+author: 'Your Organization'
+branding:
+  icon: 'scissors'
+  color: 'green'
+
+inputs:
+  github-token:
+    description: 'GitHub token with repository access'
+    required: true
+    default: ${{ github.token }}
+  
+  config-base64:
+    description: 'Base64-encoded configuration JSON'
+    required: true
+
+runs:
+  using: 'node16'
+  main: 'dist/index.js'
