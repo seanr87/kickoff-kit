@@ -10,8 +10,8 @@ This tool automates the process of creating GitHub Issues from structured CSV da
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/github-issues-csv-importer.git
-   cd github-issues-csv-importer
+   git clone https://github.com/seanr87/kickoff-kit
+   cd kickoff-kit
    ```
 
 2. Create a configuration directory with a `secrets.yaml` file:
