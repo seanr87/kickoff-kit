@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pruner.py - GitHub Project Board Manager
+pruner.py - GitHub Project Board Manager (Simplified & Automated)
 
 This script automatically manages GitHub Project boards by labeling — not deleting — 
 old, irrelevant, or non-actionable Issues to keep boards clean and focused.
@@ -12,10 +12,12 @@ import yaml
 import sys
 import os
 import time
-from datetime import datetime, timedelta
 import json
+from datetime import datetime, timedelta
 import logging
+import requests
 from typing import Dict, List, Any, Optional, Tuple
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -47,42 +49,273 @@ def log(message, level="INFO"):
     
     print(f"{prefix} {message}")
 
-def load_config(config_dir: str) -> Dict[str, Any]:
-    """Load configuration from secrets.yaml"""
+def get_current_repo():
+    """
+    Get the current repository name from git config
+    Returns tuple (owner, repo) or (None, None) if not in a git repo
+    """
     try:
-        secrets_path = Path(config_dir) / "secrets.yaml"
-        if not secrets_path.exists():
-            log(f"Secrets file not found: {secrets_path}", "ERROR")
-            sys.exit(1)
-            
-        with open(secrets_path, 'r') as f:
-            secrets = yaml.safe_load(f)
-            
-        if 'github_token' not in secrets:
-            log("GitHub token not found in secrets.yaml", "ERROR")
-            sys.exit(1)
-            
-        return secrets
-    except Exception as e:
-        log(f"Failed to load configuration: {str(e)}", "ERROR")
-        sys.exit(1)
-
-def load_pruner_config(config_path: str) -> Dict[str, Any]:
-    """Load pruner configuration from YAML file"""
-    try:
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-            
-        required_keys = ["project_id", "done_age_days", "done_overflow_limit"]
-        for key in required_keys:
-            if key not in config:
-                log(f"Required key '{key}' not found in pruner config", "ERROR")
-                sys.exit(1)
+        # Get remote URL of origin
+        stream = os.popen('git config --get remote.origin.url')
+        url = stream.read().strip()
+        
+        # Parse the URL to extract owner and repo
+        # Handle different URL formats:
+        # - HTTPS: https://github.com/owner/repo.git
+        # - SSH: git@github.com:owner/repo.git
+        if "github.com" in url:
+            if url.startswith("https://"):
+                pattern = r"https://github\.com/([^/]+)/([^/.]+)(\.git)?"
+            else:  # SSH format
+                pattern = r"git@github\.com:([^/]+)/([^/.]+)(\.git)?"
                 
-        return config
+            match = re.match(pattern, url)
+            if match:
+                owner, repo = match.groups()[0:2]
+                return owner, repo
     except Exception as e:
-        log(f"Failed to load pruner config: {str(e)}", "ERROR")
-        sys.exit(1)
+        log(f"Error detecting repository: {str(e)}", "WARNING")
+    
+    return None, None
+
+def get_github_token():
+    """
+    Try to get GitHub token from various sources:
+    1. Environment variable GITHUB_TOKEN
+    2. secrets.yaml in the parent directory of kickoff-kit
+    """
+    # Check if GITHUB_TOKEN environment variable is set
+    if "GITHUB_TOKEN" in os.environ:
+        return os.environ["GITHUB_TOKEN"]
+    
+    # Find kickoff-kit directory and its parent
+    current_path = Path(__file__).resolve()
+    
+    # Check if we're in the pruner directory inside kickoff-kit
+    if current_path.parent.name == "pruner":
+        kickoff_kit_dir = current_path.parent.parent  # kickoff-kit directory
+        parent_dir = kickoff_kit_dir.parent  # parent of kickoff-kit
+        
+        # Look for secrets.yaml in parent directory
+        secrets_path = parent_dir / "secrets.yaml"
+        log(f"Looking for secrets in: {secrets_path}")
+        
+        if secrets_path.exists():
+            try:
+                with open(secrets_path, 'r') as f:
+                    secrets = yaml.safe_load(f)
+                    if 'github_token' in secrets:
+                        return secrets['github_token']
+            except Exception as e:
+                log(f"Error reading secrets.yaml: {str(e)}", "WARNING")
+    
+    # Fallback: Check for secrets.yaml in current directory
+    current_dir = Path.cwd()
+    secrets_path = current_dir / "secrets.yaml"
+    
+    if secrets_path.exists():
+        try:
+            with open(secrets_path, 'r') as f:
+                secrets = yaml.safe_load(f)
+                if 'github_token' in secrets:
+                    return secrets['github_token']
+        except Exception as e:
+            log(f"Error reading secrets.yaml: {str(e)}", "WARNING")
+    
+    return None
+
+def detect_github_projects(token, owner, repo_name=None):
+    """
+    Detect GitHub Projects for the current user/organization and repository
+    Returns a list of (project_id, title, number, url) tuples
+    
+    If repo_name is provided, filter projects to only those associated with the repository
+    """
+    log(f"Detecting GitHub Projects for {owner}")
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    # First try to find projects directly linked to the repository
+    if repo_name:
+        log(f"Looking for projects linked to {owner}/{repo_name}")
+        repo_query = """
+        {
+          repository(owner: "%s", name: "%s") {
+            projectsV2(first: 20) {
+              nodes {
+                id
+                title
+                number
+                url
+              }
+            }
+          }
+        }
+        """ % (owner, repo_name)
+        
+        try:
+            response = requests.post(
+                "https://api.github.com/graphql",
+                headers=headers,
+                json={"query": repo_query}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "data" in data and "repository" in data["data"] and "projectsV2" in data["data"]["repository"]:
+                    projects = data["data"]["repository"]["projectsV2"]["nodes"]
+                    if projects:
+                        # Format projects for selection
+                        project_list = []
+                        for project in projects:
+                            project_list.append((project["id"], project["title"], project["number"], project["url"]))
+                        
+                        log(f"Found {len(project_list)} projects linked to repository {owner}/{repo_name}")
+                        return project_list
+        except Exception as e:
+            log(f"Error checking repository projects: {str(e)}", "WARNING")
+    
+    # If no projects found for the repository (or no repo specified), try user projects
+    log(f"Looking for user projects for {owner}")
+    user_query = """
+    {
+      user(login: "%s") {
+        projectsV2(first: 20) {
+          nodes {
+            id
+            title
+            number
+            url
+          }
+        }
+      }
+    }
+    """ % owner
+    
+    # Make the API request
+    try:
+        response = requests.post(
+            "https://api.github.com/graphql",
+            headers=headers,
+            json={"query": user_query}
+        )
+        
+        if response.status_code != 200:
+            log(f"Failed to fetch user projects: {response.text}", "WARNING")
+            # Try organization projects instead
+            org_query = """
+            {
+              organization(login: "%s") {
+                projectsV2(first: 20) {
+                  nodes {
+                    id
+                    title
+                    number
+                    url
+                  }
+                }
+              }
+            }
+            """ % owner
+            
+            response = requests.post(
+                "https://api.github.com/graphql",
+                headers=headers,
+                json={"query": org_query}
+            )
+            
+            if response.status_code != 200:
+                log(f"Failed to fetch organization projects: {response.text}", "ERROR")
+                return []
+                
+            data = response.json()
+            
+            if "errors" in data:
+                log(f"GraphQL errors: {data['errors']}", "ERROR")
+                return []
+                
+            projects = data["data"]["organization"]["projectsV2"]["nodes"]
+        else:
+            data = response.json()
+            
+            if "errors" in data:
+                log(f"GraphQL errors: {data['errors']}", "ERROR")
+                return []
+                
+            projects = data["data"]["user"]["projectsV2"]["nodes"]
+        
+        # Format projects for selection
+        project_list = []
+        for project in projects:
+            project_list.append((project["id"], project["title"], project["number"], project["url"]))
+            
+        log(f"Found {len(project_list)} projects for {owner}")
+        return project_list
+        
+    except Exception as e:
+        log(f"Error detecting projects: {str(e)}", "ERROR")
+        return []
+
+def create_config_file(project_id, repo_owner, repo_name):
+    """
+    Create a default .pruner.config file
+    """
+    config = {
+        "project_id": project_id,
+        "done_age_days": 14,
+        "done_overflow_limit": 3,
+        "wiki_page_name": "Pruner Audit Log",
+        "dry_run": True,
+        "repository": f"{repo_owner}/{repo_name}",
+        "custom_fields": {
+            "workstream_field_id": "Workstream",
+            "status_field_id": "Status",
+            "done_status_value": "Done"
+        }
+    }
+    
+    # Write config to file
+    config_path = Path.cwd() / ".pruner.config"
+    with open(config_path, 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+    
+    log(f"Created config file: {config_path}", "SUCCESS")
+    return config
+
+def load_or_create_config(project_id=None, repo_owner=None, repo_name=None):
+    """
+    Load configuration from .pruner.config or create default
+    """
+    config_path = Path.cwd() / ".pruner.config"
+    
+    if config_path.exists():
+        # Load existing config
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+                
+            log(f"Loaded configuration from {config_path}")
+            
+            # Update project_id if provided (this allows for switching projects)
+            if project_id:
+                config["project_id"] = project_id
+                with open(config_path, 'w') as f:
+                    yaml.dump(config, f, default_flow_style=False)
+                log(f"Updated project ID in configuration file")
+                
+            return config
+        except Exception as e:
+            log(f"Error loading config file: {str(e)}", "ERROR")
+    
+    # If we have project_id, create a new config
+    if project_id and repo_owner and repo_name:
+        return create_config_file(project_id, repo_owner, repo_name)
+    
+    return None
 
 def get_project_fields(github_token: str, project_id: str) -> Tuple[Dict[str, Any], List[str]]:
     """
@@ -93,8 +326,6 @@ def get_project_fields(github_token: str, project_id: str) -> Tuple[Dict[str, An
         - dict mapping field names to their details
         - list of all workstream options
     """
-    import requests
-    
     log(f"Fetching project fields for project ID: {project_id}")
     
     # GraphQL query to get project fields
@@ -179,8 +410,6 @@ def get_project_issues(github_token: str, project_id: str, config: Dict[str, Any
     """
     Get all issues from a project with their metadata including custom fields
     """
-    import requests
-    
     log(f"Fetching issues for project ID: {project_id}")
     
     # Get project fields
@@ -295,7 +524,7 @@ def get_project_issues(github_token: str, project_id: str, config: Dict[str, Any
         
         for item in items["nodes"]:
             # Skip non-issue items
-            if not item["content"] or item["content"].get("__typename") != "Issue":
+            if not item["content"] or "number" not in item["content"]:
                 continue
                 
             issue = item["content"]
@@ -335,8 +564,6 @@ def get_project_issues(github_token: str, project_id: str, config: Dict[str, Any
 
 def apply_label(github_token: str, repo_owner: str, repo_name: str, issue_number: int, label: str) -> bool:
     """Add a label to an issue"""
-    import requests
-    
     log(f"Applying label '{label}' to issue #{issue_number} in {repo_owner}/{repo_name}")
     
     headers = {
@@ -384,7 +611,6 @@ def apply_label(github_token: str, repo_owner: str, repo_name: str, issue_number
 
 def update_audit_log(github_token: str, repo_owner: str, repo_name: str, wiki_page_name: str, actions: List[Dict[str, Any]]) -> bool:
     """Update the audit log wiki page"""
-    import requests
     from base64 import b64encode, b64decode
     
     if not actions:
@@ -647,13 +873,88 @@ def run_pruner(config: Dict[str, Any], github_token: str) -> Dict[str, Any]:
         
     return result
 
+def setup_pruner():
+    """
+    Interactive setup process for pruner
+    """
+    log("Starting pruner setup...")
+    
+    # Get GitHub token
+    github_token = get_github_token()
+    if not github_token:
+        log("GitHub token not found. Please provide a personal access token:", "PROMPT")
+        github_token = input("> ").strip()
+        
+        # Save token to secrets.yaml
+        secrets_path = Path.cwd() / "secrets.yaml"
+        with open(secrets_path, 'w') as f:
+            yaml.dump({"github_token": github_token}, f, default_flow_style=False)
+        log(f"GitHub token saved to {secrets_path}", "SUCCESS")
+    
+    # Get current repository
+    repo_owner, repo_name = get_current_repo()
+    if not repo_owner or not repo_name:
+        log("Could not detect repository. Please provide repository owner and name:", "PROMPT")
+        repo_owner = input("Owner (username or organization): ").strip()
+        repo_name = input("Repository name: ").strip()
+    
+    # Detect GitHub Projects associated with the repository
+    projects = detect_github_projects(github_token, repo_owner, repo_name)
+    
+    if not projects:
+        log(f"No projects found for repository {repo_owner}/{repo_name}", "ERROR")
+        log("Please create a GitHub Project first and associate it with your repository, then run this script again.", "ERROR")
+        sys.exit(1)
+    
+    # Handle project selection
+    if len(projects) == 1:
+        # If there's only one project, select it automatically
+        selected_project = projects[0]
+        project_id, title, number, url = selected_project
+        log(f"Found one project associated with this repository: {title} (#{number})", "SUCCESS")
+        log(f"Automatically selected project: {title} (ID: {project_id})", "SUCCESS")
+    else:
+        # Show available projects
+        log(f"Found {len(projects)} GitHub Projects:", "SUCCESS")
+        for i, (project_id, title, number, url) in enumerate(projects, 1):
+            log(f"{i}. {title} (#{number}) - {url}")
+        
+        # Let user select a project
+        selection = 0
+        while selection < 1 or selection > len(projects):
+            try:
+                log("Select a project by entering its number:", "PROMPT")
+                selection = int(input("> ").strip())
+            except ValueError:
+                selection = 0
+        
+        selected_project = projects[selection - 1]
+        project_id, title, number, url = selected_project
+        log(f"Selected project: {title} (ID: {project_id})", "SUCCESS")
+    
+    # Create or update config
+    config = load_or_create_config(project_id, repo_owner, repo_name)
+    
+    # Ask about dry run
+    log("Would you like to run in dry run mode? (no labels will be applied) [Y/n]", "PROMPT")
+    dry_run = input("> ").strip().lower() != "n"
+    
+    if config:
+        config["dry_run"] = dry_run
+        
+        # Update config file
+        config_path = Path.cwd() / ".pruner.config"
+        with open(config_path, 'w') as f:
+            yaml.dump(config, f, default_flow_style=False)
+    
+    return github_token, config
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Automatically manage GitHub Project boards by labeling issues")
-    parser.add_argument("--config-dir", required=True, help="Directory containing secrets.yaml file")
-    parser.add_argument("--pruner-config", required=True, help="Path to pruner configuration file")
     parser.add_argument("--dry-run", action="store_true", help="Run without applying labels")
     parser.add_argument("--verbose", action="store_true", help="Show detailed logging information")
+    parser.add_argument("--setup", action="store_true", help="Run interactive setup")
     args = parser.parse_args()
     
     # Display header
@@ -661,13 +962,12 @@ def main():
     log("Starting pruner process...")
     
     try:
-        # Load configurations
-        log(f"Loading configuration from {args.config_dir}")
-        secrets = load_config(args.config_dir)
-        github_token = secrets["github_token"]
+        # Check if setup is requested or needed
+        config = load_or_create_config()
+        github_token = get_github_token()
         
-        log(f"Loading pruner config from {args.pruner_config}")
-        config = load_pruner_config(args.pruner_config)
+        if args.setup or not config or not github_token:
+            github_token, config = setup_pruner()
         
         # Override dry run if specified on command line
         if args.dry_run:
@@ -678,6 +978,13 @@ def main():
         if args.verbose:
             config["verbose"] = True
             log("Verbose logging enabled", "INFO")
+        
+        # Log the configuration
+        log(f"Project ID: {config['project_id']}")
+        log(f"Done age threshold: {config['done_age_days']} days")
+        log(f"Done overflow limit: {config['done_overflow_limit']} issues")
+        log(f"Workstream field: {config['custom_fields'].get('workstream_field_id', 'Workstream')}")
+        log(f"Dry run mode: {config['dry_run']}")
         
         # Run the pruner
         log(f"Running pruner for project ID: {config['project_id']}")
@@ -703,3 +1010,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    #

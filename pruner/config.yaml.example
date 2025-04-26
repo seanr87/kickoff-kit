@@ -1,0 +1,61 @@
+# Main configuration file for kickoff-kit
+
+# Project creation settings
+create_project:
+  repo: seanr87/kickoff-kit
+  project_title: Kickoff Kit Tasks
+  project_description: Project board for automation and task tracking
+  milestone_title: Prototype
+  release_tag: v1
+  release_name: Version 1
+  release_description: Initial prototype milestone
+  custom_fields:
+  - name: start date
+    type: text
+  - name: end date
+    type: text
+  - name: workstream
+    type: single_select
+    options:
+    - Core
+    - LLM
+    - GitHub
+    - Logging
+  - name: mvp
+    type: single_select
+    options:
+    - 'Yes'
+    - 'No'
+  - name: dependencies
+    type: text
+
+# Issue import settings
+import_issues:
+  issue_csv_path: scripts/import_issues/issues.csv
+
+# Pruner settings
+pruner:
+  # GitHub Project ID to monitor (will be detected automatically if not provided)
+  project_id: "PVT_xxx"  # Replace with your actual project ID
+  
+  # Number of days an issue must be in 'Done' before archiving
+  done_age_days: 14
+  
+  # Maximum number of issues in 'Done' per workstream before overflow archiving
+  done_overflow_limit: 3
+  
+  # Wiki page name for audit logging
+  wiki_page_name: "Pruner Audit Log"
+  
+  # Set to true to test without applying labels
+  dry_run: true
+  
+  # Custom field configurations
+  custom_fields:
+    # The workstream field will be detected automatically from create_project.custom_fields
+    # if not specified here
+    workstream_field_id: "workstream"
+    
+    # Status field to identify "Done" items
+    status_field_id: "Status"
+    done_status_value: "Done"
