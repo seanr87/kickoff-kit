@@ -1,0 +1,32 @@
+{
+    "name": "pruner",
+    "version": "1.0.0",
+    "description": "GitHub Project Board Manager - Part of kickoff-kit",
+    "main": "index.js",
+    "scripts": {
+      "test": "node tests/test_pruner.js --dry-run",
+      "test:workstreams": "node tests/test_workstreams.js",
+      "build": "ncc build index.js -o dist",
+      "prepare": "npm run build"
+    },
+    "keywords": [
+      "github",
+      "project",
+      "pruner",
+      "automation",
+      "kickoff-kit"
+    ],
+    "author": "Your Organization",
+    "license": "MIT",
+    "dependencies": {
+      "@actions/core": "^1.10.0",
+      "@actions/github": "^5.1.1",
+      "@octokit/auth-app": "^4.0.9",
+      "@octokit/rest": "^19.0.7",
+      "js-yaml": "^4.1.0"
+    },
+    "devDependencies": {
+      "@vercel/ncc": "^0.36.1",
+      "dotenv": "^16.0.3"
+    }
+  }
