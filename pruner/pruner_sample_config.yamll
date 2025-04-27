@@ -1,0 +1,70 @@
+# Main configuration file for MAIgnus_CAIrlsen
+
+# Project creation settings
+create_project:
+  repo: seanr87/MAIgnus_CAIrlsen
+  project_title: MAIgnus Tasks
+  project_description: Project board for automation and task tracking
+  milestone_title: Prototype
+  release_tag: v1
+  release_name: Version 1
+  release_description: Initial prototype milestone
+  custom_fields:
+  - name: start date
+    type: text
+  - name: end date
+    type: text
+  - name: workstream
+    type: single_select
+    options:
+    - Core
+    - LLM
+    - GitHub
+    - Logging
+  - name: mvp
+    type: single_select
+    options:
+    - 'Yes'
+    - 'No'
+  - name: dependencies
+    type: text
+
+# Issue import settings
+import_issues:
+  issue_csv_path: scripts/import_issues/issues.csv
+
+# Pruner settings
+pruner:
+  # GitHub Project ID to monitor
+  project_id: "PVT_kwHOCRKm2M4A3Gr_"
+  
+  # Target repository (IMPORTANT: this ensures Pruner operates on the correct repo)
+  repository: "seanr87/MAIgnus_CAIrlsen"
+  
+  # Number of days an issue must be in 'Done' before archiving
+  done_age_days: 14
+  
+  # Maximum number of issues in 'Done' per workstream before overflow archiving
+  done_overflow_limit: 3
+  
+  # Wiki page name for audit logging
+  wiki_page_name: ".github/PRUNER_LOG.md"
+  
+  # Set to true to test without applying labels
+  dry_run: true
+  
+  # Selected views to apply filters to
+  selected_views:
+  - id: "PVTV_lAHOCRKm2M4A3Gr_zgGWAAk"
+    name: "Kanban"
+    number: 3
+    layout: "BOARD LAYOUT"
+  
+  # Custom field configurations
+  custom_fields:
+    # Field name for workstream/team identification
+    workstream_field_id: "Workstream"
+    
+    # Status field to identify "Done" items
+    status_field_id: "Status"
+    done_status_value: "Done"

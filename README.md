@@ -7,7 +7,7 @@ Kickoff Kit is a set of PM tools for a GitHub Repository-Project ecosystem.
 3. [COMING SOON] `pruner`: remove Issues from project view 
 
 ## Principles
-- configuarble
+- configurable
 - accessible
 - modular
 - documented: Wiki, logging, comments

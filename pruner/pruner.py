@@ -50,10 +50,104 @@ def log(message, level="INFO"):
     
     print(f"{prefix} {message}")
 
+def find_parent_config_files():
+    """
+    Find the config.yaml and secrets.yaml files in the parent directory of kickoff-kit
+    Returns tuple (config_path, secrets_path)
+    """
+    # Get the current script path
+    current_path = Path(__file__).resolve()
+    
+    # Navigate to the kickoff-kit directory (parent of the pruner directory)
+    kickoff_kit_dir = current_path.parent.parent
+    
+    # The parent directory of kickoff-kit should contain config files
+    parent_dir = kickoff_kit_dir.parent
+    
+    config_path = parent_dir / "config.yaml"
+    secrets_path = parent_dir / "secrets.yaml"
+    
+    log(f"Looking for configuration in: {parent_dir}")
+    
+    if not config_path.exists():
+        log(f"Config file not found: {config_path}", "ERROR")
+        return None, None
+        
+    if not secrets_path.exists():
+        log(f"Secrets file not found: {secrets_path}", "WARNING")
+        
+    return config_path, secrets_path
+
+def load_config_files():
+    """
+    Load configuration from config.yaml and secrets.yaml
+    Returns dict with combined configuration
+    """
+    config_path, secrets_path = find_parent_config_files()
+    
+    if not config_path:
+        log("Configuration files not found. Please ensure config.yaml exists in the parent directory of kickoff-kit.", "ERROR")
+        sys.exit(1)
+    
+    # Load config.yaml
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+            log(f"Loaded configuration from {config_path}")
+    except Exception as e:
+        log(f"Error loading config file: {str(e)}", "ERROR")
+        sys.exit(1)
+    
+    # Load secrets.yaml if it exists
+    github_token = None
+    if secrets_path and secrets_path.exists():
+        try:
+            with open(secrets_path, 'r') as f:
+                secrets = yaml.safe_load(f)
+                if 'github_token' in secrets:
+                    github_token = secrets['github_token']
+                    log(f"Loaded GitHub token from {secrets_path}")
+                else:
+                    log(f"GitHub token not found in {secrets_path}", "WARNING")
+        except Exception as e:
+            log(f"Error loading secrets file: {str(e)}", "WARNING")
+    
+    # Check if pruner configuration exists
+    if 'pruner' not in config:
+        log("No 'pruner' section found in config.yaml. Please add pruner configuration to your config.yaml file.", "ERROR")
+        sys.exit(1)
+    
+    # Get repository details
+    repository = get_repository_from_config(config)
+    
+    # Return combined configuration
+    return {
+        "github_token": github_token,
+        "config": config,
+        "pruner_config": config.get('pruner', {}),
+        "repository": repository
+    }
+
+def get_repository_from_config(config):
+    """
+    Extract repository information from config
+    Returns "owner/repo" string
+    """
+    # First check if directly specified in pruner config
+    if 'pruner' in config and 'repository' in config['pruner']:
+        return config['pruner']['repository']
+    
+    # Try to infer from other parts of config
+    if 'create_project' in config and 'repo' in config['create_project']:
+        return config['create_project']['repo']
+    
+    # Default to current repo from git
+    return get_current_repo()
+
 def get_current_repo():
     """
     Get the current repository name from git config
-    Returns tuple (owner, repo) or (None, None) if not in a git repo
+    Returns tuple (owner/repo) or None if not in a git repo
     """
     try:
         # Get remote URL of origin
@@ -73,55 +167,34 @@ def get_current_repo():
             match = re.match(pattern, url)
             if match:
                 owner, repo = match.groups()[0:2]
-                return owner, repo
+                return f"{owner}/{repo}"
     except Exception as e:
         log(f"Error detecting repository: {str(e)}", "WARNING")
     
-    return None, None
+    return None
 
 def get_github_token():
     """
-    Try to get GitHub token from various sources:
-    1. Environment variable GITHUB_TOKEN
-    2. secrets.yaml in the parent directory of kickoff-kit
+    Get GitHub token from environment or secrets.yaml
     """
-    # Check if GITHUB_TOKEN environment variable is set
+    # First check if already loaded from secrets
+    if 'github_token' in os.environ:
+        return os.environ["GITHUB_TOKEN"]
+    
+    # Try to get from environment variable
     if "GITHUB_TOKEN" in os.environ:
         return os.environ["GITHUB_TOKEN"]
     
-    # Find kickoff-kit directory and its parent
-    current_path = Path(__file__).resolve()
-    
-    # Check if we're in the pruner directory inside kickoff-kit
-    if current_path.parent.name == "pruner":
-        kickoff_kit_dir = current_path.parent.parent  # kickoff-kit directory
-        parent_dir = kickoff_kit_dir.parent  # parent of kickoff-kit
-        
-        # Look for secrets.yaml in parent directory
-        secrets_path = parent_dir / "secrets.yaml"
-        log(f"Looking for secrets in: {secrets_path}")
-        
-        if secrets_path.exists():
-            try:
-                with open(secrets_path, 'r') as f:
-                    secrets = yaml.safe_load(f)
-                    if 'github_token' in secrets:
-                        return secrets['github_token']
-            except Exception as e:
-                log(f"Error reading secrets.yaml: {str(e)}", "WARNING")
-    
-    # Fallback: Check for secrets.yaml in current directory
-    current_dir = Path.cwd()
-    secrets_path = current_dir / "secrets.yaml"
-    
-    if secrets_path.exists():
+    # If not found, try to get from secrets.yaml
+    _, secrets_path = find_parent_config_files()
+    if secrets_path and secrets_path.exists():
         try:
             with open(secrets_path, 'r') as f:
                 secrets = yaml.safe_load(f)
                 if 'github_token' in secrets:
                     return secrets['github_token']
-        except Exception as e:
-            log(f"Error reading secrets.yaml: {str(e)}", "WARNING")
+        except Exception:
+            pass
     
     return None
 
@@ -260,63 +333,6 @@ def detect_github_projects(token, owner, repo_name=None):
     except Exception as e:
         log(f"Error detecting projects: {str(e)}", "ERROR")
         return []
-
-def create_config_file(project_id, repo_owner, repo_name):
-    """
-    Create a default .pruner.config file
-    """
-    config = {
-        "project_id": project_id,
-        "done_age_days": 14,
-        "done_overflow_limit": 3,
-        "wiki_page_name": "Pruner Audit Log",
-        "dry_run": True,
-        "repository": f"{repo_owner}/{repo_name}",
-        "custom_fields": {
-            "workstream_field_id": "Workstream",
-            "status_field_id": "Status",
-            "done_status_value": "Done"
-        }
-    }
-    
-    # Write config to file
-    config_path = Path.cwd() / ".pruner.config"
-    with open(config_path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
-    
-    log(f"Created config file: {config_path}", "SUCCESS")
-    return config
-
-def load_or_create_config(project_id=None, repo_owner=None, repo_name=None):
-    """
-    Load configuration from .pruner.config or create default
-    """
-    config_path = Path.cwd() / ".pruner.config"
-    
-    if config_path.exists():
-        # Load existing config
-        try:
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-                
-            log(f"Loaded configuration from {config_path}")
-            
-            # Update project_id if provided (this allows for switching projects)
-            if project_id:
-                config["project_id"] = project_id
-                with open(config_path, 'w') as f:
-                    yaml.dump(config, f, default_flow_style=False)
-                log(f"Updated project ID in configuration file")
-                
-            return config
-        except Exception as e:
-            log(f"Error loading config file: {str(e)}", "ERROR")
-    
-    # If we have project_id, create a new config
-    if project_id and repo_owner and repo_name:
-        return create_config_file(project_id, repo_owner, repo_name)
-    
-    return None
 
 def get_project_fields(github_token: str, project_id: str) -> Tuple[Dict[str, Any], List[str]]:
     """
@@ -766,309 +782,6 @@ def apply_view_filters(github_token: str, project_id: str, view_id: str, view_nu
         log(f"Error applying filters to view: {str(e)}", "ERROR")
         return False
     
-def run_pruner(config: Dict[str, Any], github_token: str) -> Dict[str, Any]:
-    """Run the pruner with the provided configuration"""
-    
-    # Initialize result
-    result = {
-        "success": False,
-        "not_planned_count": 0,
-        "archived_count": 0,
-        "total_processed": 0,
-        "error": None,
-        "filtered_views": []
-    }
-    
-    try:
-        # Validate required configuration
-        required_keys = ["project_id", "done_age_days", "done_overflow_limit"]
-        for key in required_keys:
-            if key not in config:
-                raise ValueError(f"Missing required configuration: {key}")
-                
-        # Extract repository from configuration or use default
-        repo_parts = config.get("repository", "").split("/")
-        repo_owner = repo_parts[0] if len(repo_parts) > 1 else None
-        repo_name = repo_parts[1] if len(repo_parts) > 1 else repo_name
-        
-        # Get issues from project
-        issues = get_project_issues(github_token, config["project_id"], config)
-        result["total_processed"] = len(issues)
-        
-        # Initialize list for audit log actions
-        actions = []
-        
-        # Process not planned issues
-        not_planned_issues = [
-            issue for issue in issues
-            if issue["closed"] and issue["closed_reason"] == "not_planned"
-        ]
-        
-        result["not_planned_count"] = len(not_planned_issues)
-        log(f"Found {len(not_planned_issues)} issues to label as 'Not Planned'")
-        
-        # Apply labels if not in dry run mode
-        if not config.get("dry_run", False):
-            for issue in not_planned_issues:
-                # Parse repository info
-                issue_repo_parts = issue["repository"].split("/")
-                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
-                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
-                
-                # Apply label
-                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Not Planned")
-                
-                if success:
-                    # Record action for audit log
-                    actions.append({
-                        "issue": issue["number"],
-                        "repository": issue["repository"],
-                        "action": "Applied label 'Not Planned'",
-                        "reason": "Issue was closed as not planned",
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-        
-        # Find issues that have been in Done status for too long
-        done_status_value = config.get("custom_fields", {}).get("done_status_value", "Done")
-        threshold_date = datetime.now(timezone.utc) - timedelta(days=config["done_age_days"])
-        
-        old_done_issues = []
-        for issue in issues:
-            if issue["status"] == done_status_value:
-                # Parse the updated_at date with timezone awareness
-                # Convert the string to a timezone-aware datetime object
-                updated_at = datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00"))
-                
-                # Now both dates have timezone info and can be compared safely
-                if updated_at < threshold_date:
-                    old_done_issues.append(issue)
-        
-        log(f"Found {len(old_done_issues)} issues to archive (Done for {config['done_age_days']}+ days)")
-        
-        # Apply labels if not in dry run mode
-        if not config.get("dry_run", False):
-            for issue in old_done_issues:
-                # Parse repository info
-                issue_repo_parts = issue["repository"].split("/")
-                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
-                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
-                
-                # Apply label
-                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Archive")
-                
-                if success:
-                    # Record action for audit log
-                    actions.append({
-                        "issue": issue["number"],
-                        "repository": issue["repository"],
-                        "action": "Applied label 'Archive'",
-                        "reason": f"Issue was in Done status for over {config['done_age_days']} days",
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-        
-        # Find overflow issues in Done status per workstream
-        workstream_counts = {}
-        workstream_issues = {}
-        
-        # Get all issues in Done status by workstream
-        for issue in issues:
-            if issue["status"] == done_status_value:
-                workstream = issue["workstream"]
-                
-                if workstream not in workstream_counts:
-                    workstream_counts[workstream] = 0
-                    workstream_issues[workstream] = []
-                
-                workstream_counts[workstream] += 1
-                workstream_issues[workstream].append(issue)
-        
-        # Sort issues by updated_at date (oldest first)
-        for workstream in workstream_issues:
-            workstream_issues[workstream].sort(key=lambda x: datetime.fromisoformat(x["updated_at"].replace("Z", "+00:00")))
-        
-        # Find overflow issues
-        overflow_limit = config["done_overflow_limit"]
-        overflow_issues = []
-        
-        for workstream, count in workstream_counts.items():
-            if count > overflow_limit:
-                # Get the oldest issues beyond the limit
-                overflow = workstream_issues[workstream][:(count - overflow_limit)]
-                overflow_issues.extend(overflow)
-        
-        log(f"Found {len(overflow_issues)} overflow issues in Done status to archive")
-        
-        # Apply labels if not in dry run mode
-        if not config.get("dry_run", False):
-            for issue in overflow_issues:
-                # Parse repository info
-                issue_repo_parts = issue["repository"].split("/")
-                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
-                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
-                
-                # Apply label
-                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Archive")
-                
-                if success:
-                    # Record action for audit log
-                    actions.append({
-                        "issue": issue["number"],
-                        "repository": issue["repository"],
-                        "action": "Applied label 'Archive'",
-                        "reason": f"Overflow: More than {overflow_limit} issues in Done status for workstream '{issue['workstream']}'",
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-        
-        # Update the result
-        result["archived_count"] = len(old_done_issues) + len(overflow_issues)
-        
-        # Update audit log if not in dry run mode and there are actions
-        if not config.get("dry_run", False) and actions:
-            wiki_page_name = config.get("wiki_page_name", "Pruner Audit Log")
-            update_audit_log(github_token, repo_owner, repo_name, wiki_page_name, actions)
-        
-        # Apply filters to selected views if not in dry run mode
-        if not config.get("dry_run", False) and config.get("selected_views", []):
-            log("Applying filters to selected views to hide archived issues...")
-            
-            # Track which views we successfully applied filters to
-            filtered_views = []
-            
-            for view_data in config.get("selected_views", []):
-                view_id = view_data.get("id")
-                view_name = view_data.get("name", "Unknown")
-                view_number = view_data.get("number")
-                
-                if not view_id or not view_number:
-                    log(f"Missing view ID or number for view: {view_name}", "ERROR")
-                    continue
-                
-                # Apply filters to this view
-                success = apply_view_filters(
-                    github_token=github_token,
-                    project_id=config["project_id"],
-                    view_id=view_id,
-                    view_number=view_number,
-                    view_name=view_name
-                )
-                
-                if success:
-                    filtered_views.append(view_name)
-            
-            # Update the result with filtered views
-            if filtered_views:
-                log(f"Successfully applied filters to views: {', '.join(filtered_views)}", "SUCCESS")
-                result["filtered_views"] = filtered_views
-            else:
-                log("Failed to apply filters to any views", "WARNING")
-        
-        result["success"] = True
-        return result
-    except Exception as e:
-        import traceback
-        log(f"Error in run_pruner: {str(e)}", "ERROR")
-        log(traceback.format_exc(), "ERROR")
-        result["error"] = str(e)
-        return result
-    
-def setup_pruner():
-    """
-    Interactive setup process for pruner
-    """
-    log("Starting pruner setup...")
-    
-    # Get GitHub token
-    github_token = get_github_token()
-    if not github_token:
-        log("GitHub token not found. Please provide a personal access token:", "PROMPT")
-        github_token = input("> ").strip()
-        
-        # Save token to secrets.yaml
-        secrets_path = Path.cwd() / "secrets.yaml"
-        with open(secrets_path, 'w') as f:
-            yaml.dump({"github_token": github_token}, f, default_flow_style=False)
-        log(f"GitHub token saved to {secrets_path}", "SUCCESS")
-    
-    # Get current repository
-    repo_owner, repo_name = get_current_repo()
-    if not repo_owner or not repo_name:
-        log("Could not detect repository. Please provide repository owner and name:", "PROMPT")
-        repo_owner = input("Owner (username or organization): ").strip()
-        repo_name = input("Repository name: ").strip()
-    
-    # Detect GitHub Projects associated with the repository
-    projects = detect_github_projects(github_token, repo_owner, repo_name)
-    
-    if not projects:
-        log(f"No projects found for repository {repo_owner}/{repo_name}", "ERROR")
-        log("Please create a GitHub Project first and associate it with your repository, then run this script again.", "ERROR")
-        sys.exit(1)
-    
-    # Handle project selection
-    if len(projects) == 1:
-        # If there's only one project, select it automatically
-        selected_project = projects[0]
-        project_id, title, number, url = selected_project
-        log(f"Found one project associated with this repository: {title} (#{number})", "SUCCESS")
-        log(f"Automatically selected project: {title} (ID: {project_id})", "SUCCESS")
-    else:
-        # Show available projects
-        log(f"Found {len(projects)} GitHub Projects:", "SUCCESS")
-        for i, (project_id, title, number, url) in enumerate(projects, 1):
-            log(f"{i}. {title} (#{number}) - {url}")
-        
-        # Let user select a project
-        selection = 0
-        while selection < 1 or selection > len(projects):
-            try:
-                log("Select a project by entering its number:", "PROMPT")
-                selection = int(input("> ").strip())
-            except ValueError:
-                selection = 0
-        
-        selected_project = projects[selection - 1]
-        project_id, title, number, url = selected_project
-        log(f"Selected project: {title} (ID: {project_id})", "SUCCESS")
-    
-    # Create or update config
-    config = load_or_create_config(project_id, repo_owner, repo_name)
-    
-    # Get project views and let user select which ones to apply filters to
-    log("\nFetching project views to determine which ones should have Pruner filters applied...")
-    views = get_project_views(github_token, project_id)
-    
-    if views:
-        selected_views = select_project_views(views)
-        
-        # Save view information to config
-        if config:
-            config["selected_views"] = [
-                {
-                    "id": view["id"],
-                    "name": view["name"],
-                    "number": view.get("number"),  # Store the view number
-                    "layout": view.get("layout_type", "Unknown")
-                }
-                for view in selected_views
-            ]
-    else:
-        log("No project views found. Will apply filters to all issues.", "WARNING")
-        config["selected_views"] = []
-    
-    # Ask about dry run
-    log("Would you like to run in dry run mode? (no labels will be applied) [Y/n]", "PROMPT")
-    dry_run = input("> ").strip().lower() != "n"
-    
-    if config:
-        config["dry_run"] = dry_run
-        
-        # Update config file
-        config_path = Path.cwd() / ".pruner.config"
-        with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
-    
-    return github_token, config
-
 def get_project_views(github_token: str, project_id: str) -> List[Dict[str, Any]]:
     """
     Get all views (lists/boards/etc) for a GitHub Project using the GraphQL API
@@ -1177,195 +890,6 @@ def select_project_views(views: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             selected_views = views
     
     return selected_views
-
-
-
-# Update the run_pruner function to use the selected views
-def run_pruner(config: Dict[str, Any], github_token: str) -> Dict[str, Any]:
-    """Run the pruner with the provided configuration"""
-    
-    # Initialize result
-    result = {
-        "success": False,
-        "not_planned_count": 0,
-        "archived_count": 0,
-        "total_processed": 0,
-        "error": None,
-        "views_processed": []
-    }
-    
-    try:
-        # Validate required configuration
-        required_keys = ["project_id", "done_age_days", "done_overflow_limit"]
-        for key in required_keys:
-            if key not in config:
-                raise ValueError(f"Missing required configuration: {key}")
-        
-        # Extract repository from configuration or use default
-        repo_parts = config.get("repository", "").split("/")
-        repo_owner = repo_parts[0] if len(repo_parts) > 1 else None
-        repo_name = repo_parts[1] if len(repo_parts) > 1 else None
-        
-        # Check if specific views are selected
-        selected_views = config.get("selected_views", [])
-        if selected_views:
-            view_names = [view.get("name", "Unknown") for view in selected_views]
-            log(f"Applying filters to {len(selected_views)} selected views: {', '.join(view_names)}", "INFO")
-            
-            # Track which views we've processed
-            result["views_processed"] = view_names
-            
-            # Get view IDs
-            view_ids = [view.get("id") for view in selected_views if "id" in view]
-            
-            # Get issues from project, filtered by views
-            issues = get_project_issues_by_views(github_token, config["project_id"], config, view_ids)
-        else:
-            log("No specific views selected, applying filters to all issues", "INFO")
-            # Get all issues from project
-            issues = get_project_issues(github_token, config["project_id"], config)
-        
-        result["total_processed"] = len(issues)
-        
-        # Process not planned issues
-        not_planned_issues = [
-            issue for issue in issues
-            if issue["closed"] and issue["closed_reason"] == "not_planned"
-        ]
-        
-        result["not_planned_count"] = len(not_planned_issues)
-        log(f"Found {len(not_planned_issues)} issues to label as 'Not Planned'")
-        
-        # Apply labels if not in dry run mode
-        actions = []  # For audit log
-        
-        if not config.get("dry_run", False):
-            for issue in not_planned_issues:
-                # Parse repository info
-                issue_repo_parts = issue["repository"].split("/")
-                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
-                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
-                
-                # Apply label
-                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Not Planned")
-                
-                if success:
-                    # Record action for audit log
-                    actions.append({
-                        "issue": issue["number"],
-                        "repository": issue["repository"],
-                        "action": "Applied label 'Not Planned'",
-                        "reason": "Issue was closed as not planned",
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-        
-        # Find issues that have been in Done status for too long
-        done_status_value = config.get("custom_fields", {}).get("done_status_value", "Done")
-        threshold_date = datetime.now(timezone.utc) - timedelta(days=config["done_age_days"])
-        
-        old_done_issues = []
-        for issue in issues:
-            if issue["status"] == done_status_value:
-                # Parse the updated_at date with timezone awareness
-                updated_at = datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00"))
-                
-                # Now both dates have timezone info and can be compared safely
-                if updated_at < threshold_date:
-                    old_done_issues.append(issue)
-        
-        log(f"Found {len(old_done_issues)} issues to archive (Done for {config['done_age_days']}+ days)")
-        
-        # Apply labels if not in dry run mode
-        if not config.get("dry_run", False):
-            for issue in old_done_issues:
-                # Parse repository info
-                issue_repo_parts = issue["repository"].split("/")
-                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
-                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
-                
-                # Apply label
-                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Archive")
-                
-                if success:
-                    # Record action for audit log
-                    actions.append({
-                        "issue": issue["number"],
-                        "repository": issue["repository"],
-                        "action": "Applied label 'Archive'",
-                        "reason": f"Issue was in Done status for over {config['done_age_days']} days",
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-        
-        # Find overflow issues in Done status per workstream
-        workstream_counts = {}
-        workstream_issues = {}
-        
-        # Get all issues in Done status by workstream
-        for issue in issues:
-            if issue["status"] == done_status_value:
-                workstream = issue["workstream"]
-                
-                if workstream not in workstream_counts:
-                    workstream_counts[workstream] = 0
-                    workstream_issues[workstream] = []
-                
-                workstream_counts[workstream] += 1
-                workstream_issues[workstream].append(issue)
-        
-        # Sort issues by updated_at date (oldest first)
-        for workstream in workstream_issues:
-            workstream_issues[workstream].sort(key=lambda x: datetime.fromisoformat(x["updated_at"].replace("Z", "+00:00")))
-        
-        # Find overflow issues
-        overflow_limit = config["done_overflow_limit"]
-        overflow_issues = []
-        
-        for workstream, count in workstream_counts.items():
-            if count > overflow_limit:
-                # Get the oldest issues beyond the limit
-                overflow = workstream_issues[workstream][:(count - overflow_limit)]
-                overflow_issues.extend(overflow)
-        
-        log(f"Found {len(overflow_issues)} overflow issues in Done status to archive")
-        
-        # Apply labels if not in dry run mode
-        if not config.get("dry_run", False):
-            for issue in overflow_issues:
-                # Parse repository info
-                issue_repo_parts = issue["repository"].split("/")
-                issue_owner = issue_repo_parts[0] if len(issue_repo_parts) > 1 else repo_owner
-                issue_repo = issue_repo_parts[1] if len(issue_repo_parts) > 1 else repo_name
-                
-                # Apply label
-                success = apply_label(github_token, issue_owner, issue_repo, issue["number"], "Archive")
-                
-                if success:
-                    # Record action for audit log
-                    actions.append({
-                        "issue": issue["number"],
-                        "repository": issue["repository"],
-                        "action": "Applied label 'Archive'",
-                        "reason": f"Overflow: More than {overflow_limit} issues in Done status for workstream '{issue['workstream']}'",
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-        
-        # Update the result
-        result["archived_count"] = len(old_done_issues) + len(overflow_issues)
-        
-        # Update audit log if not in dry run mode and there are actions
-        if not config.get("dry_run", False) and actions:
-            wiki_page_name = config.get("wiki_page_name", "Pruner Audit Log")
-            update_audit_log(github_token, repo_owner, repo_name, wiki_page_name, actions)
-        
-        result["success"] = True
-        return result
-    except Exception as e:
-        import traceback
-        log(f"Error in run_pruner: {str(e)}", "ERROR")
-        log(traceback.format_exc(), "ERROR")
-        result["error"] = str(e)
-        return result
-
 
 def get_project_issues_by_views(github_token: str, project_id: str, config: Dict[str, Any], 
                                view_ids: List[str]) -> List[Dict[str, Any]]:
@@ -1571,6 +1095,314 @@ def get_project_issues_by_views(github_token: str, project_id: str, config: Dict
     log(f"Total unique issues across selected views: {len(issues)}")
     return issues
 
+def run_pruner(config: Dict[str, Any], github_token: str, target_repository: str) -> Dict[str, Any]:
+    """Run the pruner with the provided configuration"""
+    
+    # Initialize result
+    result = {
+        "success": False,
+        "not_planned_count": 0,
+        "archived_count": 0,
+        "total_processed": 0,
+        "error": None,
+        "views_processed": []
+    }
+    
+    try:
+        # Validate required configuration
+        required_keys = ["project_id", "done_age_days", "done_overflow_limit"]
+        for key in required_keys:
+            if key not in config:
+                raise ValueError(f"Missing required configuration key: {key}")
+        
+        # Extract repository parts
+        repo_parts = target_repository.split("/")
+        if len(repo_parts) != 2:
+            raise ValueError(f"Invalid repository format: {target_repository}. Expected 'owner/repo'")
+            
+        repo_owner, repo_name = repo_parts
+        
+        # Check if specific views are selected
+        selected_views = config.get("selected_views", [])
+        if selected_views:
+            view_names = [view.get("name", "Unknown") for view in selected_views]
+            log(f"Applying filters to {len(selected_views)} selected views: {', '.join(view_names)}", "INFO")
+            
+            # Track which views we've processed
+            result["views_processed"] = view_names
+            
+            # Get view IDs
+            view_ids = [view.get("id") for view in selected_views if "id" in view]
+            
+            # Get issues from project, filtered by views
+            issues = get_project_issues_by_views(github_token, config["project_id"], config, view_ids)
+        else:
+            log("No specific views selected, applying filters to all issues", "INFO")
+            # Get all issues from project
+            issues = get_project_issues(github_token, config["project_id"], config)
+        
+        result["total_processed"] = len(issues)
+        
+        # Filter issues to the target repository if specified
+        if target_repository:
+            issues = [issue for issue in issues if issue["repository"] == target_repository]
+            log(f"Filtered to {len(issues)} issues from repository {target_repository}")
+        
+        # Process not planned issues
+        not_planned_issues = [
+            issue for issue in issues
+            if issue["closed"] and issue["closed_reason"] == "not_planned"
+        ]
+        
+        result["not_planned_count"] = len(not_planned_issues)
+        log(f"Found {len(not_planned_issues)} issues to label as 'Not Planned'")
+        
+        # Apply labels if not in dry run mode
+        actions = []  # For audit log
+        
+        if not config.get("dry_run", False):
+            for issue in not_planned_issues:
+                # Apply label
+                success = apply_label(github_token, repo_owner, repo_name, issue["number"], "Not Planned")
+                
+                if success:
+                    # Record action for audit log
+                    actions.append({
+                        "issue": issue["number"],
+                        "repository": issue["repository"],
+                        "action": "Applied label 'Not Planned'",
+                        "reason": "Issue was closed as not planned",
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+        
+        # Find issues that have been in Done status for too long
+        done_status_value = config.get("custom_fields", {}).get("done_status_value", "Done")
+        threshold_date = datetime.now(timezone.utc) - timedelta(days=config["done_age_days"])
+        
+        old_done_issues = []
+        for issue in issues:
+            if issue["status"] == done_status_value:
+                # Parse the updated_at date with timezone awareness
+                updated_at = datetime.fromisoformat(issue["updated_at"].replace("Z", "+00:00"))
+                
+                # Now both dates have timezone info and can be compared safely
+                if updated_at < threshold_date:
+                    old_done_issues.append(issue)
+        
+        log(f"Found {len(old_done_issues)} issues to archive (Done for {config['done_age_days']}+ days)")
+        
+        # Apply labels if not in dry run mode
+        if not config.get("dry_run", False):
+            for issue in old_done_issues:
+                # Apply label
+                success = apply_label(github_token, repo_owner, repo_name, issue["number"], "Archive")
+                
+                if success:
+                    # Record action for audit log
+                    actions.append({
+                        "issue": issue["number"],
+                        "repository": issue["repository"],
+                        "action": "Applied label 'Archive'",
+                        "reason": f"Issue was in Done status for over {config['done_age_days']} days",
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+        
+        # Find overflow issues in Done status per workstream
+        workstream_counts = {}
+        workstream_issues = {}
+        
+        # Get all issues in Done status by workstream
+        for issue in issues:
+            if issue["status"] == done_status_value:
+                workstream = issue["workstream"]
+                
+                if workstream not in workstream_counts:
+                    workstream_counts[workstream] = 0
+                    workstream_issues[workstream] = []
+                
+                workstream_counts[workstream] += 1
+                workstream_issues[workstream].append(issue)
+        
+        # Sort issues by updated_at date (oldest first)
+        for workstream in workstream_issues:
+            workstream_issues[workstream].sort(key=lambda x: datetime.fromisoformat(x["updated_at"].replace("Z", "+00:00")))
+        
+        # Find overflow issues
+        overflow_limit = config["done_overflow_limit"]
+        overflow_issues = []
+        
+        for workstream, count in workstream_counts.items():
+            if count > overflow_limit:
+                # Get the oldest issues beyond the limit
+                overflow = workstream_issues[workstream][:(count - overflow_limit)]
+                overflow_issues.extend(overflow)
+        
+        log(f"Found {len(overflow_issues)} overflow issues in Done status to archive")
+        
+        # Apply labels if not in dry run mode
+        if not config.get("dry_run", False):
+            for issue in overflow_issues:
+                # Apply label
+                success = apply_label(github_token, repo_owner, repo_name, issue["number"], "Archive")
+                
+                if success:
+                    # Record action for audit log
+                    actions.append({
+                        "issue": issue["number"],
+                        "repository": issue["repository"],
+                        "action": "Applied label 'Archive'",
+                        "reason": f"Overflow: More than {overflow_limit} issues in Done status for workstream '{issue['workstream']}'",
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+        
+        # Update the result
+        result["archived_count"] = len(old_done_issues) + len(overflow_issues)
+        
+        # Update audit log if not in dry run mode and there are actions
+        if not config.get("dry_run", False) and actions:
+            wiki_page_name = config.get("wiki_page_name", ".github/PRUNER_LOG.md")
+            update_audit_log(github_token, repo_owner, repo_name, wiki_page_name, actions)
+        
+        result["success"] = True
+        return result
+    except Exception as e:
+        import traceback
+        log(f"Error in run_pruner: {str(e)}", "ERROR")
+        log(traceback.format_exc(), "ERROR")
+        result["error"] = str(e)
+        return result
+
+def setup_pruner():
+    """
+    Interactive setup process for pruner
+    Updates config.yaml in the parent directory
+    """
+    log("Starting pruner setup...")
+    
+    # Load existing configuration
+    config_data = load_config_files()
+    github_token = config_data.get("github_token") or get_github_token()
+    
+    if not github_token:
+        log("GitHub token not found. Please provide a personal access token:", "PROMPT")
+        github_token = input("> ").strip()
+        
+        # Save token to secrets.yaml in parent directory
+        _, secrets_path = find_parent_config_files()
+        if secrets_path:
+            # Create secrets.yaml if it doesn't exist
+            with open(secrets_path, 'w') as f:
+                yaml.dump({"github_token": github_token}, f, default_flow_style=False)
+            log(f"GitHub token saved to {secrets_path}", "SUCCESS")
+    
+    # Get target repository
+    target_repository = config_data.get("repository")
+    if not target_repository:
+        log("Repository not specified in configuration. Please provide owner and name:", "PROMPT")
+        repo_owner = input("Owner (username or organization): ").strip()
+        repo_name = input("Repository name: ").strip()
+        target_repository = f"{repo_owner}/{repo_name}"
+    
+    # Extract owner and name from repository
+    repo_parts = target_repository.split("/")
+    if len(repo_parts) != 2:
+        log(f"Invalid repository format: {target_repository}. Expected 'owner/repo'", "ERROR")
+        sys.exit(1)
+        
+    repo_owner, repo_name = repo_parts
+    
+    # Detect GitHub Projects associated with the repository
+    projects = detect_github_projects(github_token, repo_owner, repo_name)
+    
+    if not projects:
+        log(f"No projects found for repository {repo_owner}/{repo_name}", "ERROR")
+        log("Please create a GitHub Project first and associate it with your repository, then run this script again.", "ERROR")
+        sys.exit(1)
+    
+    # Handle project selection
+    if len(projects) == 1:
+        # If there's only one project, select it automatically
+        selected_project = projects[0]
+        project_id, title, number, url = selected_project
+        log(f"Found one project associated with this repository: {title} (#{number})", "SUCCESS")
+        log(f"Automatically selected project: {title} (ID: {project_id})", "SUCCESS")
+    else:
+        # Show available projects
+        log(f"Found {len(projects)} GitHub Projects:", "SUCCESS")
+        for i, (project_id, title, number, url) in enumerate(projects, 1):
+            log(f"{i}. {title} (#{number}) - {url}")
+        
+        # Let user select a project
+        selection = 0
+        while selection < 1 or selection > len(projects):
+            try:
+                log("Select a project by entering its number:", "PROMPT")
+                selection = int(input("> ").strip())
+            except ValueError:
+                selection = 0
+        
+        selected_project = projects[selection - 1]
+        project_id, title, number, url = selected_project
+        log(f"Selected project: {title} (ID: {project_id})", "SUCCESS")
+    
+    # Get project views and let user select which ones to apply filters to
+    log("\nFetching project views to determine which ones should have Pruner filters applied...")
+    views = get_project_views(github_token, project_id)
+    
+    selected_views = []
+    if views:
+        selected_views = select_project_views(views)
+        
+        # Format selected views for config
+        selected_views_config = [
+            {
+                "id": view["id"],
+                "name": view["name"],
+                "number": view.get("number"),  # Store the view number
+                "layout": view.get("layout_type", "Unknown")
+            }
+            for view in selected_views
+        ]
+    else:
+        log("No project views found.", "WARNING")
+    
+    # Ask about dry run
+    log("Would you like to run in dry run mode? (no labels will be applied) [Y/n]", "PROMPT")
+    dry_run = input("> ").strip().lower() != "n"
+    
+    # Create pruner configuration
+    pruner_config = {
+        "project_id": project_id,
+        "repository": target_repository,
+        "done_age_days": 14,  # Default
+        "done_overflow_limit": 3,  # Default
+        "wiki_page_name": ".github/PRUNER_LOG.md",  # Default
+        "dry_run": dry_run,
+        "selected_views": selected_views_config,
+        "custom_fields": {
+            "workstream_field_id": "Workstream",
+            "status_field_id": "Status",
+            "done_status_value": "Done"
+        }
+    }
+    
+    # Update config.yaml in parent directory
+    config_path, _ = find_parent_config_files()
+    if config_path:
+        # Load existing config
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f) or {}
+        
+        # Update pruner section
+        config["pruner"] = pruner_config
+        
+        # Save updated config
+        with open(config_path, 'w') as f:
+            yaml.dump(config, f, default_flow_style=False)
+            
+        log(f"Updated pruner configuration in {config_path}", "SUCCESS")
+    
+    return github_token, pruner_config, target_repository
 
 def main():
     # Parse command line arguments
@@ -1578,6 +1410,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Run without applying labels")
     parser.add_argument("--verbose", action="store_true", help="Show detailed logging information")
     parser.add_argument("--setup", action="store_true", help="Run interactive setup")
+    parser.add_argument("--repository", help="Override target repository (format: owner/repo)")
     args = parser.parse_args()
     
     # Display header
@@ -1585,33 +1418,42 @@ def main():
     log("Starting pruner process...")
     
     try:
-        # Check if setup is requested or needed
-        config = load_or_create_config()
-        github_token = get_github_token()
+        # Load configuration from parent directory
+        config_data = load_config_files()
+        github_token = config_data.get("github_token") or get_github_token()
+        pruner_config = config_data.get("pruner_config", {})
+        target_repository = args.repository or config_data.get("repository")
         
-        if args.setup or not config or not github_token:
-            github_token, config = setup_pruner()
+        # Check if setup is requested or needed
+        if args.setup or not pruner_config or not github_token:
+            github_token, pruner_config, target_repository = setup_pruner()
         
         # Override dry run if specified on command line
         if args.dry_run:
-            config["dry_run"] = True
+            pruner_config["dry_run"] = True
             log("Dry run mode enabled via command line", "WARNING")
         
         # Enable verbose logging if specified
         if args.verbose:
-            config["verbose"] = True
+            pruner_config["verbose"] = True
             log("Verbose logging enabled", "INFO")
         
+        # Validate target repository
+        if not target_repository:
+            log("Target repository not specified. Please use --repository or set in config.yaml.", "ERROR")
+            sys.exit(1)
+        
         # Log the configuration
-        log(f"Project ID: {config['project_id']}")
-        log(f"Done age threshold: {config['done_age_days']} days")
-        log(f"Done overflow limit: {config['done_overflow_limit']} issues")
-        log(f"Workstream field: {config['custom_fields'].get('workstream_field_id', 'Workstream')}")
-        log(f"Dry run mode: {config['dry_run']}")
+        log(f"Project ID: {pruner_config['project_id']}")
+        log(f"Target repository: {target_repository}")
+        log(f"Done age threshold: {pruner_config.get('done_age_days', 14)} days")
+        log(f"Done overflow limit: {pruner_config.get('done_overflow_limit', 3)} issues")
+        log(f"Workstream field: {pruner_config.get('custom_fields', {}).get('workstream_field_id', 'Workstream')}")
+        log(f"Dry run mode: {pruner_config.get('dry_run', False)}")
         
         # Run the pruner
-        log(f"Running pruner for project ID: {config['project_id']}")
-        result = run_pruner(config, github_token)
+        log(f"Running pruner for project ID: {pruner_config['project_id']} on repository {target_repository}")
+        result = run_pruner(pruner_config, github_token, target_repository)
         
         # Display results
         if result["success"]:
@@ -1620,9 +1462,9 @@ def main():
             log(f"Labeled {result['archived_count']} issues as \"Archive\"", "INFO")
             log(f"Total issues processed: {result['total_processed']}", "INFO")
             
-            # Report on filtered views
-            if "filtered_views" in result and result["filtered_views"]:
-                log(f"Applied filters to {len(result['filtered_views'])} views: {', '.join(result['filtered_views'])}", "SUCCESS")
+            # Report on views
+            if "views_processed" in result and result["views_processed"]:
+                log(f"Applied to views: {', '.join(result['views_processed'])}", "SUCCESS")
         else:
             log(f"Pruner failed: {result['error']}", "ERROR")
             sys.exit(1)
@@ -1638,4 +1480,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    #

@@ -3,16 +3,10 @@
 ## Developer
 Claude 
 
-Be as concise as possible. Always take a step by step approach and walk me through implementation slowly.
+Be as concise and as simple as possible. Take a step by step approach and walk me through implementation slowly.
 
 When troubleshooting, provide only the functions or sections that need to be replaced and carefully explain precisely where the code to remove is.
 
 This is a part of kickoff-kit, a set of project management tools for GitHub Repos and Projects.
 https://github.com/seanr87/kickoff-kit
 Development will occur in kick-kit/[this project name] and all configuration shall be done via config.yaml and secrets.yaml, which exist in kickoff-kit/.
-
-Principles:
-- accessible for non coders
-- easy to troubleshoot: informative logging & well commented
-- configurable via secrets.yaml and config.yaml
-- modular
