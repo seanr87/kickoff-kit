@@ -224,6 +224,14 @@ def analyze_csv_and_project(csv_path, token, owner, repo, project_number, projec
                 if value:
                     custom_fields[header].add(value)
     
+    # Ensure 'Workstream' is included in custom fields
+    if 'workstream' not in custom_fields:
+        custom_fields['Workstream'] = set()
+        for row in csv_rows:
+            value = row.get('Workstream', "").strip()
+            if value:
+                custom_fields['Workstream'].add(value)
+
     # Check which custom fields already exist
     existing_custom_fields = []
     missing_fields = {}
@@ -257,18 +265,6 @@ def analyze_csv_and_project(csv_path, token, owner, repo, project_number, projec
         if missing:
             missing_options[field] = missing
             
-    # Check for date fields
-    date_fields = []
-    for header in headers:
-        header_lower = header.lower()
-        if header_lower in DATE_FIELDS:
-            # Check if field exists
-            if header_lower in project_fields:
-                date_fields.append(header)
-            else:
-                # Add to missing fields
-                missing_fields[header] = ["DATE FIELD"]
-                
     # Return the analysis results
     return {
         "success": True,
@@ -278,8 +274,8 @@ def analyze_csv_and_project(csv_path, token, owner, repo, project_number, projec
         "missing_options": missing_options,
         "project_fields": project_fields,
         "csv_headers": headers,
-        "csv_rows": csv_rows,  # This is now properly defined
+        "csv_rows": csv_rows,
         "project_id": project_id,
-        "project_url": project_url,
-        "date_fields": date_fields
+        "project_url": project_url
     }
+
